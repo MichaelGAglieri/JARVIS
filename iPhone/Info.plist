@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_jarvis._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Serve per trovare JARVIS sul tuo Mac nella rete di casa.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Mentre tieni premuto il pulsante, la tua voce va a JARVIS sul Mac.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Serve per sentire la parola Jarvis. Il riconoscimento avviene su questo dispositivo.</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Solo tu puoi aprire JARVIS da qui.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Serve solo per inquadrare il codice QR di abbinamento.</string>
+</dict>
+</plist>

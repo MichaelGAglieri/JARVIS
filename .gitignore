@@ -1,0 +1,24 @@
+# Build
+.build/
+build/
+*.xcodeproj/
+!iPhone/JARVISPhone.xcodeproj/
+iPhone/JARVISPhone.xcodeproj/xcuserdata/
+iPhone/JARVISPhone.xcodeproj/project.xcworkspace/
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Personal values of this Mac (bundle identifier, Apple Team)
+local.env
+
+# Notes for work sessions, local only
+PROSSIME_FASI.md
+
+# Local-only tools and lists (GitHub publishing)
+local/
