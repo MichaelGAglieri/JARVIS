@@ -3,7 +3,7 @@ import SwiftUI
 /// The drop-down panels: they open one at a time or all together, each in its place around the reactor,
 /// which stays still and fully visible.
 enum HUDDrawer: String, CaseIterable, Identifiable {
-    case transcript, log, activity, modules, protocolPanel
+    case transcript, log, activity, modules, protocolPanel, thought
     var id: String { rawValue }
     /// Histories on the left, controls and state on the right.
     var isLeft: Bool { [.transcript, .log, .activity].contains(self) }
@@ -14,6 +14,7 @@ enum HUDDrawer: String, CaseIterable, Identifiable {
         case .activity: return "clock"
         case .modules: return "square.stack.3d.up"
         case .protocolPanel: return "slider.horizontal.3"
+        case .thought: return "terminal"
         }
     }
     var title: String {
@@ -23,6 +24,7 @@ enum HUDDrawer: String, CaseIterable, Identifiable {
         case .activity: return "Attività"
         case .modules: return "Moduli"
         case .protocolPanel: return "Protocollo"
+        case .thought: return "Pensiero"
         }
     }
 }
@@ -94,7 +96,7 @@ struct HUDView: View {
     private var iconRing: some View {
         ZStack {
             ForEach(Array(HUDDrawer.allCases.enumerated()), id: \.element) { index, item in
-                ringIcon(item.symbol, active: drawers.contains(item), left: true, slot: Double(index) - 2) {
+                ringIcon(item.symbol, active: drawers.contains(item), left: true, slot: Double(index) - 2.5) {
                     if drawers.contains(item) { drawers.remove(item) } else { drawers.insert(item) }
                 }
                 .help(item.title)
@@ -129,7 +131,7 @@ struct HUDView: View {
     /// the free space, the others are as tall as needed.
     private func drawerColumn(left: Bool) -> some View {
         let open = HUDDrawer.allCases.filter { $0.isLeft == left && drawers.contains($0) }
-        let hasTall = open.contains { $0 == .transcript || $0 == .log }
+        let hasTall = open.contains { $0 == .transcript || $0 == .log || $0 == .thought }
         return VStack(spacing: 10) {
             if !hasTall { Spacer(minLength: 0) }
             ForEach(open) { drawerPanel($0).background(HUD.background.opacity(0.82), in: HUD.panelShape) }
@@ -147,6 +149,7 @@ struct HUDView: View {
         case .activity: activityPanel
         case .modules: linkPanel
         case .protocolPanel: modePanel
+        case .thought: thoughtPanel
         }
     }
 
@@ -272,6 +275,44 @@ struct HUDView: View {
                 .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(HUD.cyan.opacity(0.5), lineWidth: 1))
         }
         .buttonStyle(.plain)
+    }
+
+    /// A terminal of JARVIS's observable activity: route chosen, tools run, searches, files, sources, timings.
+    private var thoughtPanel: some View {
+        HUDPanel(title: "PENSIERO") {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        if assistant.thoughts.isEmpty {
+                            Text("> in attesa di una richiesta_").font(HUD.mono(10)).foregroundStyle(HUD.cyan.opacity(0.4))
+                        }
+                        ForEach(assistant.thoughts) { line in
+                            Text("\(line.time) \(line.message)").font(HUD.mono(10))
+                                .foregroundStyle(Self.thoughtColor(line.message))
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        }
+                        if [.thinking, .acting].contains(assistant.state) {
+                            Text("▌").font(HUD.mono(10)).foregroundStyle(HUD.ice)
+                        }
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+                .frame(maxHeight: .infinity)
+                .onChange(of: assistant.thoughts.last?.id) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+            }
+        }
+    }
+
+    private static func thoughtColor(_ body: String) -> Color {
+        if body.hasPrefix("✕") { return HUD.amber }
+        if body.hasPrefix("»") { return HUD.ice }
+        if body.hasPrefix("←") { return HUD.cyan.opacity(0.55) }
+        if body.hasPrefix("✓") { return Color.green.opacity(0.8) }
+        return HUD.cyan.opacity(0.9)
     }
 
     private var logPanel: some View {

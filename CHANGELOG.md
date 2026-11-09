@@ -3,6 +3,11 @@
 Every version was built, installed and tested on the Mac (and on the iPhone and iPad app when it was
 involved) before moving to the next one. All dates are in 2026.
 
+## 1.30.9 — 9 November
+
+- New **Thought** panel (PENSIERO) in the HUD, available from the terminal icon. It shows the request route, commands, queries, files consulted, domains found, and timestamped outcomes.
+- The panel follows the latest line, keeps up to 300 events in memory, and clears on “New conversation”.
+
 ## 1.30.8 — 9 November
 
 - The HUD sphere becomes a neural network: the spiral is replaced by 16 neurons with dendrites, joined by soft

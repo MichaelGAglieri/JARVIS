@@ -153,8 +153,10 @@ reinstalled every 7 days (it warns two days before); pairing and settings are ke
 ## HUD and NUCLEUS
 
 - **HUD**: the animated sphere and its state on a borderless translucent background. Hovering shows the
-  buttons in a circle around the reactor: five panels (Phrases, Log, Activity, Modules, Protocol), NUCLEUS,
+  buttons in a circle around the reactor: six panels (Phrases, Log, Activity, Modules, Protocol, Thought), NUCLEUS,
   settings and ×.
+- **Thought**: the terminal icon opens a request activity log on the right. It shows the route, tools,
+  queries, files consulted, domains found, outcomes and errors. It keeps up to 300 lines in memory and clears on “New conversation”.
 - **NUCLEUS** (◎): shrinks JARVIS to the reactor alone, in a round window on the desktop, above the wallpaper
   and below every app window. There is one on every display, kept within its own display. It pulses while
   JARVIS listens or speaks; a click opens the HUD around it on that display (if the HUD is open on another

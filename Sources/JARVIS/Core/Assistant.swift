@@ -96,6 +96,14 @@ final class Assistant: ObservableObject {
     @Published private(set) var brain: Brain = .local
     @Published private(set) var claudeStatus = "—"
     @Published private(set) var log: [String] = []
+    /// The thought panel: how each request is handled, step by step (route, tools, sources, results).
+    struct ActivityLine: Identifiable {
+        let id = UUID()
+        let time: String
+        let message: String
+    }
+
+    @Published private(set) var thoughts: [ActivityLine] = []
     /// False when the HUD is hidden or covered: the animation stops.
     @Published var hudVisible = true
     /// True when the compact reactor is visible.
@@ -964,6 +972,12 @@ final class Assistant: ObservableObject {
     // MARK: Answer
 
     private func respond(to command: String, language lang: Language) async {
+        think("» \(command)")
+        let started = Date()
+        defer {
+            let elapsed = Date().timeIntervalSince(started)
+            think(String(format: Task.isCancelled ? "· annullato · %.1f s" : "· fine richiesta · %.1f s", elapsed))
+        }
         // A new request reopens app control, unless it is a "basta".
         if Self.isStopCommand(command) || Self.isRobotStop(command) { tools.appControl.halt() } else { tools.appControl.resume() }
         if Self.isUnloadModelCommand(command) {
@@ -1125,6 +1139,7 @@ final class Assistant: ObservableObject {
     private func runProtocol(_ command: String, language lang: Language) async -> Bool {
         guard let (item, rest) = Protocols.match(command) else { return false }
         Diagnostics.log("protocollo \(item.name)")
+        think("→ protocollo \(item.name)")
         tools.currentLanguage = lang
         let name = rest.isEmpty ? "Studio" : rest.capitalized
         func run(_ steps: [JarvisProtocol.Step]) async -> [String] {
@@ -1133,7 +1148,7 @@ final class Assistant: ObservableObject {
                 let arguments = step.arguments.mapValues { value -> Any in
                     (value as? String)?.replacingOccurrences(of: "{resto}", with: name) ?? value
                 }
-                if case .result(let result) = await tools.run(ToolCall(name: step.tool, arguments: arguments)) { results.append(result) }
+                if case .result(let result) = await runTracedTool(ToolCall(name: step.tool, arguments: arguments)) { results.append(result) }
             }
             return results
         }
@@ -1166,7 +1181,7 @@ final class Assistant: ObservableObject {
         let sir = italian ? "signore" : "sir"
         tools.currentLanguage = lang
         func run(_ tool: String, _ arguments: [String: Any]) async -> ToolOutcome {
-            await tools.run(ToolCall(name: tool, arguments: arguments))
+            await runTracedTool(ToolCall(name: tool, arguments: arguments))
         }
         let text: String
         // An answer with data must be said in full, even if it is not ready yet.
@@ -1249,6 +1264,8 @@ final class Assistant: ObservableObject {
             let duration = InstantCommand.spoken(seconds: seconds, italian: italian)
             text = italian ? "Timer di \(duration) avviato, \(sir)." : "Timer set for \(duration), \(sir)."
         }
+        think("→ comando istantaneo, senza modello")
+        if case .time = instant { think("← orologio del Mac · \(text)") }
         firstSentencePending = false
         // Answers while the action happens: if the sentence with the name is not ready yet,
         // this time it says a ready-made acknowledgment and prepares the other for next time.
@@ -1271,6 +1288,7 @@ final class Assistant: ObservableObject {
     /// Answer with the local model (Ollama) and JARVIS's tools.
     private func respondLocally(_ command: String, language lang: Language, brief: Bool = false) async {
         answering = .local
+        think("→ nucleo locale \(config.localModel)\(memory.promptBlock.isEmpty ? "" : " · con memoria")")
         state = .thinking
         reply = ""
         currentReplyMentionsName = false
@@ -1330,7 +1348,7 @@ final class Assistant: ObservableObject {
                 for call in calls {
                     note("▸ \(call.name) \(Self.describe(call.arguments))")
                     if !speech.isSpeaking { state = .acting }
-                    switch await tools.run(call) {
+                    switch await runTracedTool(call) {
                     case .result(let result):
                         turn.append(["role": "tool", "tool_name": call.name, "content": result])
                     case .needsConfirmation(let action):
@@ -1353,6 +1371,7 @@ final class Assistant: ObservableObject {
                 : "Apologies, sir, my local core is not responding."
             reply = message
             note(error.localizedDescription)
+            think("✕ \(error.localizedDescription)")
             speakSentence(message, lang)
         }
         // In the history images remain only as placeholders: sending them again on
@@ -1554,6 +1573,7 @@ final class Assistant: ObservableObject {
     private func respondWithClaude(_ command: String, language lang: Language, model: String? = nil,
                                    effort: String? = nil, learning: Bool = false, brief: Bool = false) async {
         answering = .claude
+        think("→ Claude \((model ?? claude.model).capitalized)\(claude.startsNewSession ? " · nuova sessione" : "")")
         if let model {
             claude.model = model
             note("Domanda a Claude \(model.capitalized)")
@@ -1606,6 +1626,8 @@ final class Assistant: ObservableObject {
                     }
                     note("☁︎ \(name.replacingOccurrences(of: "mcp__jarvis__", with: ""))")
                     if !speech.isSpeaking { state = .acting }
+                case .trace(let line):
+                    think(line)
                 }
             }
             if let rest = splitter.flush(), !full.contains(Self.vocabularyMarker) { say(rest) }
@@ -1618,6 +1640,7 @@ final class Assistant: ObservableObject {
         } catch {
             if Task.isCancelled { return }
             note(error.localizedDescription)
+            think("✕ \(error.localizedDescription)")
             if case ClaudeError.notLoggedIn = error { claudeStatus = "LOGIN NECESSARIO" }
             let notice: String
             if case ClaudeError.notLoggedIn = error {
@@ -2111,9 +2134,31 @@ final class Assistant: ObservableObject {
         heard = ""
         reply = ""
         conversation.removeAll()
+        thoughts.removeAll()
     }
 
     // MARK: Utilities
+
+    private func runTracedTool(_ call: ToolCall) async -> ToolOutcome {
+        think(ClaudeBridge.describeToolUse(call.name, call.arguments))
+        let outcome = await tools.run(call)
+        switch outcome {
+        case .result(let result):
+            think(ClaudeBridge.describeToolResult(result, tool: call.name, isError: false))
+        case .needsConfirmation:
+            think("→ in attesa di conferma")
+        case .image:
+            think("← immagine acquisita")
+        }
+        return outcome
+    }
+
+    private func think(_ message: String) {
+        let time = Date().formatted(.dateTime.hour().minute().second())
+        let line = message.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if thoughts.count >= 300 { thoughts.removeFirst(thoughts.count - 299) }
+        thoughts.append(ActivityLine(time: time, message: String(line.prefix(500))))
+    }
 
     private func note(_ message: String) {
         let time = Date().formatted(date: .omitted, time: .standard)

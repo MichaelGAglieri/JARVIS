@@ -14,7 +14,7 @@ for n, f in [("A", "Arial.ttf"), ("AB", "Arial Bold.ttf"), ("AI", "Arial Italic.
     pdfmetrics.registerFont(TTFont(n, F + f))
 pdfmetrics.registerFontFamily("A", normal="A", bold="AB", italic="AI", boldItalic="AB")
 
-EDITION, EDITION_SHORT, VERSION = "9 NOVEMBER 2026", "9 NOV 2026", "1.30.8"
+EDITION, EDITION_SHORT, VERSION = "9 NOVEMBER 2026", "9 NOV 2026", "1.30.9"
 NAVY = colors.HexColor("#12293E"); TEAL = colors.HexColor("#0B7F91"); INK = colors.HexColor("#22313F")
 GREY = colors.HexColor("#6B7B88"); ROW = colors.HexColor("#EDF5F7"); LINE = colors.HexColor("#CFDDE3")
 CREAM = colors.HexColor("#FFF6E5"); AMBER = colors.HexColor("#E7A63C"); MINT = colors.HexColor("#E9F7F8")
@@ -108,7 +108,7 @@ section("voice", "Talking to Jarvis and using the interface", "Voice and interfa
            ["Hide / show", "Esc or × hide the HUD. The icons appear when you hover over the reactor. From the Jarvis menu choose Show HUD."],
            ["Reset the conversation", "Jarvis menu › New conversation. Saved memories stay."],
            ["Quit the app", "Jarvis menu › Quit JARVIS."]]),
-    H("HUD"), P("The HUD is a holographic sphere (a neural network: neurons that fire along glowing axons, a bright core and small data screens; the NUCLEUS keeps the reactor), on a translucent background that fades into the desktop, with the state written below. It reacts to listening and to the voice, and moves by dragging it. Hovering shows the icons in a circle around the reactor: on the left the five panels Phrases, Log, Activity, Modules and Protocol, which open to the side, one or all together; on the right the NUCLEUS, the settings gear and ×. A second click on an icon closes its panel."),
+    H("HUD"), P("The HUD is a holographic sphere (a neural network: neurons that fire along glowing axons, a bright core and small data screens; the NUCLEUS keeps the reactor), on a translucent background that fades into the desktop, with the state written below. It reacts to listening and to the voice, and moves by dragging it. Hovering shows the icons in a circle around the reactor: on the left the six panels Phrases, Log, Activity, Modules, Protocol and Thought, which open to the side, one or all together; on the right the NUCLEUS, the settings gear and ×. A second click on an icon closes its panel. The Thought panel (terminal icon) works like a terminal of JARVIS's reasoning: for each request it lists the route chosen (instant command, protocol, local core or Claude), the tools run with their arguments, web searches, files read, the sites found, results, errors and timings."),
     P("In the PROTOCOL panel the dot ● shows who is answering right now: LOCALE (local) or CLAUDE. Below you can choose HAIKU, SONNET or OPUS."),
     S("Main states: IN ATTESA (waiting) → IN ASCOLTO (listening) → ELABORAZIONE (processing) → ANALISI (thinking) → ESECUZIONE (running, when a tool is needed) → RISPOSTA (answering). ANOMALIA (error) shows a problem with a short detail."),
     H("NUCLEUS on the desktop"), P("The button with concentric circles shrinks the HUD to the round reactor, which you can drag. There is one on every display, and each stays within its own display. It lives above the wallpaper and the desktop widgets and below the windows. A click opens the HUD exactly around that NUCLEUS, like a magnification of it; if the HUD is open on another display it shrinks there first; the right button opens a small menu. When you open a central panel of the desktop widgets, the NUCLEUS hides and comes back when it closes."),
