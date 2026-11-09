@@ -73,7 +73,10 @@ claude auth login --claudeai
 ## Quick start
 
 - Say **"Jarvis"** followed by the command ("Jarvis, what time is it?"), or just "Jarvis" and wait for the beep.
-- When you ask it to do something it acknowledges at once ("Right away, sir") and then works.
+- When you ask it to do something it acknowledges at once ("Right away, sir") and then works. During actions
+  (apps, clicks, robot, printer, music) it does not narrate the steps: at the end it says only "Done", the result,
+  the error or the question it needs. Questions and conversation get a full answer.
+- A protocol with `"sintetico": true` in protocolli.json is a sequence of actions: it acknowledges at once and speaks only at the end.
 - Or press **⌃⌥Space** (Control + Option + Space) and speak. Press it again to interrupt.
 - "Stop" or "cancel" ("basta", "annulla") stop it. It answers in the language you speak.
 - **Esc** or **×** hide the HUD; JARVIS keeps listening. The ◎ icon in the menu bar brings it back.
@@ -149,11 +152,13 @@ reinstalled every 7 days (it warns two days before); pairing and settings are ke
 
 ## HUD and NUCLEUS
 
-- **HUD**: the animated reactor and its state on a borderless translucent background. Hovering shows the
+- **HUD**: the animated sphere and its state on a borderless translucent background. Hovering shows the
   buttons in a circle around the reactor: five panels (Phrases, Log, Activity, Modules, Protocol), NUCLEUS,
   settings and ×.
 - **NUCLEUS** (◎): shrinks JARVIS to the reactor alone, in a round window on the desktop, above the wallpaper
-  and below every app window. It pulses while JARVIS listens or speaks; a click reopens the HUD around it.
+  and below every app window. There is one on every display, kept within its own display. It pulses while
+  JARVIS listens or speaks; a click opens the HUD around it on that display (if the HUD is open on another
+  display, it shrinks there first).
 - The animation runs at 30 fps while JARVIS works, 12 while waiting, 6 after a minute, and stops when hidden.
 
 ## Brains: Gemma and Claude
@@ -187,7 +192,8 @@ defence against content that gives orders. JARVIS never types into password fiel
 ## App control
 
 `Actions/AppControl.swift`, with macOS's **Accessibility** permission: JARVIS reads a window's buttons, fields
-and text (`app_read`), presses (`app_press`), types (`app_type`), uses the keyboard (`app_key`), and for apps
+and text (`app_read`), presses (`app_press`), types (`app_type`), uses the keyboard (`app_key`), scrolls the page or
+a list inside it (`app_scroll`, since many apps show only what is on screen), and for apps
 that hide their elements looks at the window (`app_look`) and clicks a point (`app_click_at`). The rules live
 in code (`Core/ConfirmationPolicy.swift`): the model can add a confirmation, never remove one.
 
@@ -215,7 +221,7 @@ after a few days. ⌃⌥Space always works, and if the check fails JARVIS answer
 | Reminders | at the due time |
 | Study | every 2 hours of an open study session, it suggests a break |
 | Battery | at 20 % or less on battery, once |
-| Printer | when a Bambu print finishes, pauses or fails |
+| Printer | when a Bambu print finishes, pauses or fails; if the printer does not answer, JARVIS looks for it on the network less and less often (up to every 30 minutes), never in quiet hours or privacy mode, and at once when you ask about it |
 | Briefing | at the first activation of the day between 5 and 12 |
 
 Alerts wait while JARVIS is in privacy mode, in a conversation or waiting for a confirmation, and during
@@ -241,14 +247,16 @@ quiet hours (23–8). Each one can be turned off in Settings › Initiative.
    writing. A local Python service synthesises it: **Qwen3** on MLX in Italian, imitating
    `Resources/voce_jarvis.wav` (a synthetic voice), **Kokoro** (Lewis) in English, with Supertonic and Apple
    voices as fallbacks. You can interrupt it by voice.
-8. **HUD**: the reactor is drawn with SwiftUI `Canvas` and reacts to state and voice level.
+8. **HUD**: the open HUD shows a holographic sphere drawn with Metal: a plexus of nodes, glowing ribbons
+   (neurons that fire along glowing axons), a bright core, small live data screens and a broken rim. It reacts to state and voice level, and
+   every change of state eases in. The NUCLEUS keeps the reactor drawn with SwiftUI `Canvas`.
 
 ## Project structure
 
 | Part | Technology | Files |
 |---|---|---|
 | App, windows, animations | SwiftUI + AppKit | `Sources/JARVIS/App.swift` |
-| HUD and reactor | SwiftUI `Canvas` | `Sources/JARVIS/HUD/` |
+| HUD, sphere and reactor | Metal, SwiftUI `Canvas` | `Sources/JARVIS/HUD/` |
 | Microphone, VAD, phrases | AVAudioEngine | `Sources/JARVIS/Audio/` |
 | Wake word and transcription | WhisperKit (Porcupine optional) | `Sources/JARVIS/AI/Transcriber.swift`, `Audio/Porcupine.swift` |
 | Local brain | Ollama, `gemma4:12b-it-qat`, tool calling | `Sources/JARVIS/AI/Ollama.swift`, `Persona.swift` |

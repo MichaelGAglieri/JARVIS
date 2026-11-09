@@ -23,6 +23,8 @@ final class Initiative {
     var canSpeak: () -> Bool = { false }
     var announce: (String) -> Void = { _ in }
     var startBriefing: () -> Void = {}
+    /// The briefing will start after this answer: its data can be gathered now.
+    var prepareBriefing: () -> Void = {}
     var studySession: () -> ActivityTracker.Session? = { nil }
 
     private let store = EKEventStore()
@@ -56,6 +58,7 @@ final class Initiative {
         let c = config()
         let hour = Calendar.current.component(.hour, from: Date())
         guard c.morningBriefing, (c.briefingFrom..<c.briefingUntil).contains(hour), !briefedToday else { return }
+        if !briefingPending { prepareBriefing() }
         briefingPending = true
     }
 
@@ -175,6 +178,8 @@ final class Initiative {
     }
 
     // MARK: Delivery
+
+    var isQuietTime: Bool { inQuietHours(config()) }
 
     private func inQuietHours(_ c: JarvisConfig) -> Bool {
         let hour = Calendar.current.component(.hour, from: Date())

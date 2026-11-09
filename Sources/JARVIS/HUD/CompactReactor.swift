@@ -3,18 +3,20 @@ import SwiftUI
 
 /// NUCLEUS mode: only the reactor, in a small round window that lives
 /// on the desktop, above the wallpaper but below every app window.
-/// It can be dragged anywhere (the position is remembered), pulses when
-/// JARVIS listens or speaks, and a click reopens the full HUD.
+/// There is one for every display. Each can be dragged within its display (the
+/// position is remembered per display), pulses when JARVIS listens or speaks,
+/// and a click opens the full HUD on that display.
 final class ReactorPanel: NSPanel {
     static let size: CGFloat = 170
-    /// Level −1: just below app windows (level 0) but above the wallpaper
-    /// and desktop widgets like Übersicht, which uses exactly level −1
-    /// for a full-screen window: any lower and the NUCLEUS would stay hidden.
-    static let desktopLevel = NSWindow.Level(rawValue: -1)
-    private var keepVisible: Timer?
+    /// The normal level, always kept at its back (see `orderFrontRegardless`): above
+    /// the wallpaper and the desktop widgets (level −1), below every app window.
+    static let desktopLevel = NSWindow.Level.normal
     private var uncover: Timer?
+    /// The display this NUCLEUS belongs to.
+    let displayID: CGDirectDisplayID
 
-    init(assistant: Assistant, onOpen: @escaping () -> Void) {
+    init(assistant: Assistant, screen: NSScreen, onOpen: @escaping (ReactorPanel) -> Void) {
+        displayID = screen.displayID
         super.init(contentRect: NSRect(x: 0, y: 0, width: Self.size, height: Self.size),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
@@ -28,7 +30,7 @@ final class ReactorPanel: NSPanel {
         // the NUCLEUS instead must always stay on the desktop.
         hidesOnDeactivate = false
         let host = ReactorHostingView(rootView: CompactReactorView(assistant: assistant))
-        host.onClick = onOpen
+        host.onClick = { [weak self] in if let self { onOpen(self) } }
         host.assistant = assistant
         contentView = host
         // The widgets' central panels (Manual, Privacy) sit below the NUCLEUS: it steps aside.
@@ -40,20 +42,65 @@ final class ReactorPanel: NSPanel {
                 DispatchQueue.main.async { panel.setCovered(covered) }
             }, "\(jarvisBundleID).nucleo.\(name)" as CFString, nil, .deliverImmediately)
         }
-        if !setFrameUsingName("JARVISReactor") { placeAtCenter() }
-        setFrameAutosaveName("JARVISReactor")
+        // Each display remembers its own position. The single NUCLEUS of older
+        // versions keeps its place on the display where it was.
+        let name = "JARVISReactor-\(displayID)"
+        if !setFrameUsingName(name) && !(setFrameUsingName("JARVISReactor") && isOnOwnScreen) { placeAtCenter() }
+        if !isOnOwnScreen { placeAtCenter() }
+        setFrameAutosaveName(name)
     }
 
-    /// First time: at the centre of the screen (below the menu bar), where
+    /// The display of this NUCLEUS, if it is still connected.
+    var ownScreen: NSScreen? { NSScreen.screens.first { $0.displayID == displayID } }
+
+    private var isOnOwnScreen: Bool {
+        ownScreen?.frame.contains(NSPoint(x: frame.midX, y: frame.midY)) ?? false
+    }
+
+    /// First time: at the centre of its display (below the menu bar), where
     /// the core of the user's wallpaper falls.
     func placeAtCenter() {
-        guard let screen = NSScreen.main?.visibleFrame else { return }
-        setFrameOrigin(NSPoint(x: screen.midX - Self.size / 2, y: screen.midY - Self.size / 2))
+        guard let area = (ownScreen ?? NSScreen.main)?.visibleFrame else { return }
+        setFrameOrigin(NSPoint(x: area.midX - Self.size / 2, y: area.midY - Self.size / 2))
+    }
+
+    /// Moves the NUCLEUS, but never past the edges of its own display: every display
+    /// has its own, and one pushed onto another display ended up under the desktop widgets.
+    func move(to point: NSPoint) {
+        var origin = point
+        if let area = ownScreen?.visibleFrame {
+            origin.x = min(max(origin.x, area.minX), area.maxX - frame.width)
+            origin.y = min(max(origin.y, area.minY), area.maxY - frame.height)
+        }
+        if origin != frame.origin { setFrameOrigin(origin) }
+    }
+
+    /// After the displays change, each NUCLEUS goes back inside its own display.
+    func keepOnOwnScreen() { move(to: frame.origin) }
+
+    /// Called when its display is disconnected.
+    func tearDown() {
+        CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque())
+        uncover?.invalidate()
+        stacking?.invalidate()
+        orderOut(nil)
+    }
+
+    /// Hidden while a central widget panel is open.
+    private var widgetCovered = false
+    /// Hidden while an app window it could not get behind covers it completely.
+    private var appCovered = false
+    private var stacking: Timer?
+
+    private func applyVisibility() {
+        let hidden = widgetCovered || appCovered
+        animator().alphaValue = hidden ? 0 : 1
+        ignoresMouseEvents = hidden
     }
 
     private func setCovered(_ covered: Bool) {
-        animator().alphaValue = covered ? 0 : 1
-        ignoresMouseEvents = covered
+        widgetCovered = covered
+        applyVisibility()
         // If the widget reloads with the panel open the "show" does not arrive: it comes back by itself.
         uncover?.invalidate()
         uncover = covered ? Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: false) { [weak self] _ in self?.setCovered(false) } : nil
@@ -61,24 +108,58 @@ final class ReactorPanel: NSPanel {
 
     override var canBecomeKey: Bool { false }
 
-    /// AppKit resets the level to "normal" when the window is shown:
-    /// it is set again every time. Then, every 3 seconds, the NUCLEUS comes back in front
-    /// of the other level −1 elements (never above apps): if a desktop widget
-    /// redraws over it, it reappears by itself.
+    /// Shown at the back of the normal level: behind every app window, and above
+    /// the desktop widgets (Übersicht uses level −1 for a full-screen window). At level −1
+    /// the NUCLEUS shared that level and macOS kept the widgets in front of it: on the main
+    /// display it stayed visible through them but could no longer be clicked or dragged.
     override func orderFrontRegardless() {
-        super.orderFrontRegardless()
         level = Self.desktopLevel
-        keepVisible?.invalidate()
-        keepVisible = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            guard let self, self.isVisible else { return }
-            self.order(.above, relativeTo: 0)
+        orderBack(nil)
+        stacking?.invalidate()
+        stacking = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkStacking() }
         }
     }
 
     override func orderOut(_ sender: Any?) {
-        keepVisible?.invalidate()
-        keepVisible = nil
+        stacking?.invalidate()
+        stacking = nil
         super.orderOut(sender)
+    }
+
+    /// macOS does not always keep the NUCLEUS at the back: an app window enlarged to
+    /// fill the screen ended up underneath it. If an app window overlapping it is
+    /// below, it goes back behind; if macOS refuses and that window covers it
+    /// completely, it hides until the window moves away.
+    private func checkStacking() {
+        guard isVisible else { return }
+        let me = CGRect(x: frame.minX, y: (NSScreen.screens.first?.frame.maxY ?? 0) - frame.maxY,
+                        width: frame.width, height: frame.height)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        func appWindowsBelow() -> [CGRect] {
+            guard let list = CGWindowListCopyWindowInfo([.optionOnScreenBelowWindow, .excludeDesktopElements],
+                                                        CGWindowID(windowNumber)) as? [[String: Any]] else { return [] }
+            return list.compactMap { info in
+                guard (info[kCGWindowLayer as String] as? Int) == 0,
+                      (info[kCGWindowOwnerPID as String] as? Int32) != pid,
+                      (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.05,
+                      let b = info[kCGWindowBounds as String] as? [String: CGFloat],
+                      let x = b["X"], let y = b["Y"], let w = b["Width"], let h = b["Height"], w > 40, h > 40
+                else { return nil }
+                let r = CGRect(x: x, y: y, width: w, height: h)
+                return r.intersects(me) ? r : nil
+            }
+        }
+        var below = appWindowsBelow()
+        if !below.isEmpty {
+            orderBack(nil)
+            below = appWindowsBelow()
+        }
+        let hide = below.contains { $0.contains(me) }
+        if hide != appCovered {
+            appCovered = hide
+            applyVisibility()
+        }
     }
 }
 
@@ -87,28 +168,33 @@ final class ReactorPanel: NSPanel {
 final class ReactorHostingView: NSHostingView<CompactReactorView> {
     var onClick: (() -> Void)?
     weak var assistant: Assistant?
-    private var downEvent: NSEvent?
+    private var start: (mouse: NSPoint, origin: NSPoint)?
     private var dragging = false
 
     override func mouseDown(with event: NSEvent) {
-        downEvent = event
+        start = window.map { (NSEvent.mouseLocation, $0.frame.origin) }
         dragging = false
     }
 
-    /// As soon as the mouse moves a few points, the drag goes to macOS
-    /// (the same used for every window): smooth and precise.
+    /// After a few points of movement the NUCLEUS follows the mouse, stopping at the
+    /// edges of its display (a macOS window drag would let it cross onto another one).
     override func mouseDragged(with event: NSEvent) {
-        guard !dragging, let down = downEvent else { return }
-        let dx = event.locationInWindow.x - down.locationInWindow.x
-        let dy = event.locationInWindow.y - down.locationInWindow.y
-        guard abs(dx) > 3 || abs(dy) > 3 else { return }
+        guard let start, let panel = window as? ReactorPanel else { return }
+        let mouse = NSEvent.mouseLocation
+        let dx = mouse.x - start.mouse.x, dy = mouse.y - start.mouse.y
+        guard dragging || abs(dx) > 3 || abs(dy) > 3 else { return }
         dragging = true
-        window?.performDrag(with: down)
+        panel.move(to: NSPoint(x: start.origin.x + dx, y: start.origin.y + dy))
     }
 
     override func mouseUp(with event: NSEvent) {
-        if !dragging { onClick?() }
-        downEvent = nil
+        if dragging {
+            // Back in front of the desktop widgets, which share its level.
+            window?.orderFrontRegardless()
+        } else {
+            onClick?()
+        }
+        start = nil
         dragging = false
     }
 
@@ -150,5 +236,12 @@ struct CompactReactorView: View {
         .frame(width: ReactorPanel.size, height: ReactorPanel.size)
         .contentShape(Circle())
         .help("NUCLEO di JARVIS · clic per aprire l'HUD, trascina per spostare")
+    }
+}
+
+extension NSScreen {
+    /// Stable identifier of the display, used to give each one its own NUCLEUS.
+    var displayID: CGDirectDisplayID {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     }
 }

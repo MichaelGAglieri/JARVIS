@@ -1,0 +1,94 @@
+
+// Live test: a real window, every state in turn, synthetic audio levels and an
+// artificial GPU load like speech synthesis. Counts the frames really shown.
+import Combine
+import Metal
+
+enum SphereHarness {
+    static var times: [CFTimeInterval] = []
+    static var dropped = 0
+    static func presented(_ t: CFTimeInterval) { DispatchQueue.main.async { if t > 0 { times.append(t) } else { dropped += 1 } } }
+}
+
+/// Keeps the GPU busy in bursts, as the voice model does while it speaks.
+final class GPULoad {
+    let device = MTLCreateSystemDefaultDevice()!
+    lazy var queue = device.makeCommandQueue()!
+    lazy var pipeline: MTLComputePipelineState = {
+        let src = """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void burn(device float *o [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+            float x = float(i);
+            for (int k = 0; k < 4000; k++) { x = fma(x, 1.0001, 0.5); x = sin(x); }
+            o[i] = x;
+        }
+        """
+        let lib = try! device.makeLibrary(source: src, options: nil)
+        return try! device.makeComputePipelineState(function: lib.makeFunction(name: "burn")!)
+    }()
+    lazy var buffer = device.makeBuffer(length: 4 * 1 << 20)!
+    var on = false
+    func run() {
+        DispatchQueue.global().async {
+            while true {
+                guard self.on else { usleep(20_000); continue }
+                let c = self.queue.makeCommandBuffer()!, e = c.makeComputeCommandEncoder()!
+                e.setComputePipelineState(self.pipeline); e.setBuffer(self.buffer, offset: 0, index: 0)
+                e.dispatchThreads(MTLSize(width: 1 << 18, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                e.endEncoding(); c.commit(); c.waitUntilCompleted()
+            }
+        }
+    }
+}
+
+@main struct SphereLiveApp: App {
+    @StateObject private var assistant = Assistant()
+    var body: some Scene {
+        WindowGroup("Sfera live") {
+            ZStack { HUD.background; ReactorView(assistant: assistant).frame(width: 490, height: 490) }
+                .frame(width: 520, height: 520)
+                .onAppear { Runner.shared.start(assistant) }
+        }
+    }
+}
+
+@MainActor final class Runner {
+    static let shared = Runner()
+    let load = GPULoad()
+    var timer: Timer?
+    func start(_ assistant: Assistant) {
+        let load = ProcessInfo.processInfo.environment["GPU_LOAD"] == "1"
+        if load { self.load.run() }
+        let script: [(Assistant.State, Double, Bool)] = [(.idle, 3, false), (.listening, 3, false), (.transcribing, 1.5, false),
+            (.thinking, 3, load), (.speaking, 5, load), (.thinking, 1.5, load), (.speaking, 3, load), (.idle, 3, false)]
+        var index = -1, phaseEnd = Date(), phaseStart = Date(), report: [String] = []
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                let now = Date(), t = now.timeIntervalSinceReferenceDate
+                assistant.levels.mic = Float(pow(max(0, sin(t * 3)), 2) * 0.85)
+                assistant.levels.voice = Float((0.5 + 0.5 * sin(t * 13)) * (0.45 + 0.45 * sin(t * 2)))
+                guard now >= phaseEnd else { return }
+                if index >= 0 {
+                    let times = SphereHarness.times
+                    let gaps = zip(times.dropFirst(), times).map { $0 - $1 }
+                    let fps = Double(times.count) / now.timeIntervalSince(phaseStart)
+                    let worst = gaps.max() ?? 0
+                    let expected = script[index].0 == .idle ? 1.0 / 20 : 1.0 / 30
+                    let hitches = gaps.filter { $0 > expected * 1.9 }.count
+                    report.append(String(format: "%-12@ fps %5.1f  worst gap %4.0f ms  hitches %3d  not shown %d",
+                                         "\(script[index].0)" as NSString, fps, worst * 1000, hitches, SphereHarness.dropped))
+                }
+                index += 1
+                SphereHarness.times = []; SphereHarness.dropped = 0
+                guard index < script.count else {
+                    print("GPU load: \(load ? "on" : "off")"); report.forEach { print($0) }
+                    exit(0)
+                }
+                assistant.state = script[index].0
+                self.load.on = script[index].2
+                phaseStart = now; phaseEnd = now.addingTimeInterval(script[index].1)
+            }
+        }
+    }
+}

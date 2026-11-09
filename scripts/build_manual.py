@@ -14,7 +14,7 @@ for n, f in [("A", "Arial.ttf"), ("AB", "Arial Bold.ttf"), ("AI", "Arial Italic.
     pdfmetrics.registerFont(TTFont(n, F + f))
 pdfmetrics.registerFontFamily("A", normal="A", bold="AB", italic="AI", boldItalic="AB")
 
-EDITION, EDITION_SHORT, VERSION = "8 NOVEMBER 2026", "8 NOV 2026", "1.30.2"
+EDITION, EDITION_SHORT, VERSION = "9 NOVEMBER 2026", "9 NOV 2026", "1.30.8"
 NAVY = colors.HexColor("#12293E"); TEAL = colors.HexColor("#0B7F91"); INK = colors.HexColor("#22313F")
 GREY = colors.HexColor("#6B7B88"); ROW = colors.HexColor("#EDF5F7"); LINE = colors.HexColor("#CFDDE3")
 CREAM = colors.HexColor("#FFF6E5"); AMBER = colors.HexColor("#E7A63C"); MINT = colors.HexColor("#E9F7F8")
@@ -102,16 +102,16 @@ section("voice", "Talking to Jarvis and using the interface", "Voice and interfa
            ["Command in one sentence", "“Jarvis, set a 25 minute study timer”."],
            ["Call and request apart", "Say “Jarvis”, wait for the beep and speak right away. It does not answer “Yes, sir?”: it answers only at the end of the sentence."],
            ["Keyboard activation", "Control + Option + Space. Press it again to cancel listening or interrupt an answer."],
-           ["Immediate acknowledgment", "When you ask it to do or check something it answers at once, for example “Right away, sir” or “One moment, sir”, and then works. If it takes more than 10 seconds it warns once. Greetings and small talk just get an answer."],
+           ["Immediate acknowledgment", "When you ask it to do or check something it answers at once, for example “Right away, sir” or “One moment, sir”, and then works. If it takes more than 10 seconds it warns once. During actions (apps, clicks, robot, printer, music) it does not narrate the steps: at the end it says only “Done”, the result, the error or the question it needs. Questions and conversation get a full answer. Greetings and small talk just get an answer."],
            ["After the answer", "It goes back to waiting: you can talk freely, and for a new command say “Jarvis” again. It keeps listening for a few seconds only if it waits for a “yes” or “no”. After one of its questions it waits 8 seconds for your answer, without you saying “Jarvis” again."],
            ["Interrupting it", "“Stop”, “basta”, “fermati”, “zitto” or “silenzio”, with or without “Jarvis”. They stop it in about a second and also stop connected robots."],
            ["Hide / show", "Esc or × hide the HUD. The icons appear when you hover over the reactor. From the Jarvis menu choose Show HUD."],
            ["Reset the conversation", "Jarvis menu › New conversation. Saved memories stay."],
            ["Quit the app", "Jarvis menu › Quit JARVIS."]]),
-    H("HUD"), P("The HUD is the reactor alone, on a translucent background that fades into the desktop, with the state written below. It reacts to listening and to the voice, and moves by dragging it. Hovering shows the icons in a circle around the reactor: on the left the five panels Phrases, Log, Activity, Modules and Protocol, which open to the side, one or all together; on the right the NUCLEUS, the settings gear and ×. A second click on an icon closes its panel."),
+    H("HUD"), P("The HUD is a holographic sphere (a neural network: neurons that fire along glowing axons, a bright core and small data screens; the NUCLEUS keeps the reactor), on a translucent background that fades into the desktop, with the state written below. It reacts to listening and to the voice, and moves by dragging it. Hovering shows the icons in a circle around the reactor: on the left the five panels Phrases, Log, Activity, Modules and Protocol, which open to the side, one or all together; on the right the NUCLEUS, the settings gear and ×. A second click on an icon closes its panel."),
     P("In the PROTOCOL panel the dot ● shows who is answering right now: LOCALE (local) or CLAUDE. Below you can choose HAIKU, SONNET or OPUS."),
     S("Main states: IN ATTESA (waiting) → IN ASCOLTO (listening) → ELABORAZIONE (processing) → ANALISI (thinking) → ESECUZIONE (running, when a tool is needed) → RISPOSTA (answering). ANOMALIA (error) shows a problem with a short detail."),
-    H("NUCLEUS on the desktop"), P("The button with concentric circles shrinks the HUD to the round reactor, which you can drag. It lives above the wallpaper and below the windows. A click reopens the HUD exactly around the NUCLEUS, like a magnification of it; the right button opens a small menu. When you open a central panel of the desktop widgets, the NUCLEUS hides and comes back when it closes."),
+    H("NUCLEUS on the desktop"), P("The button with concentric circles shrinks the HUD to the round reactor, which you can drag. There is one on every display, and each stays within its own display. It lives above the wallpaper and the desktop widgets and below the windows. A click opens the HUD exactly around that NUCLEUS, like a magnification of it; if the HUD is open on another display it shrinks there first; the right button opens a small menu. When you open a central panel of the desktop widgets, the NUCLEUS hides and comes back when it closes."),
     callout("Hiding does not turn the microphone off", "Esc, × and NUCLEUS mode leave Jarvis working. To stop listening use privacy mode or quit the app. Privacy mode turns off at every JARVIS restart."))
 
 section("voiceprint", "Owner voice recognition", "Owner voice recognition", "Making “Jarvis” work only with your voice.",
@@ -131,7 +131,8 @@ section("voiceprint", "Owner voice recognition", "Owner voice recognition", "Mak
     callout("It is not a lock", "A similar voice or a recording of yours can fool it. That is why the most delicate actions also ask for Touch ID, which a voice cannot imitate."),
     H("If it ignores you or answers others"),
     bullets("It ignores you from afar: use <b>Add sentences</b> from that distance, or lower the strictness a little.",
-            "It answers another person: raise the strictness a little and try again."),)
+            "It answers another person: raise the strictness a little and try again.",
+            "If you name Jarvis in the middle of a sentence said to someone else (“I think Jarvis proved you right”) it stays silent. If the sentence is for it (“now that I’m done Jarvis, what do you suggest?”) it answers, without the opening acknowledgment."),)
 
 section("settings", "Settings and personalisation", "Settings", "Open the gear in the HUD or Settings from the Jarvis menu.",
     table([["Section", "Options and use"],
@@ -173,7 +174,7 @@ section("mac", "Mac, files, music and web", "Mac, files, music and web", "Useful
     callout("Apps and executable files", "Opening an app by name is direct. Opening a program, a script or an installer from a path asks for “yes” and Touch ID, like Shortcuts.", warn=False))
 
 section("control", "App control", "App control", "JARVIS uses the buttons and fields of apps for you.",
-    P("With the Accessibility permission JARVIS reads a window, presses buttons, types into fields and uses the keyboard. If an app does not expose its elements it looks at the window and clicks a point. It works <b>only with Claude</b> and never in privacy mode."),
+    P("With the Accessibility permission JARVIS reads a window, presses buttons, types into fields and uses the keyboard. Many apps show only what is on screen: JARVIS scrolls the page, or a list inside the page, without keys or clicks, and reads again. If an app does not expose its elements it looks at the window and clicks a point. It works <b>only with Claude</b> and never in privacy mode."),
     bullets("“Jarvis, open the Calculator and do 7 plus 8.”", "“Jarvis, in the open page look for the lab opening hours.”", "“Jarvis, in Notes delete the shopping note.”"),
     Spacer(1, 4),
     table([["What it asks", "Actions"],
@@ -196,7 +197,7 @@ section("agenda", "Calendar, reminders and mail", "Calendar, reminders and mail"
            ["Jarvis", "Sums up recipient, subject and text, and waits."],
            ["You", "“Yes” to send, “no” to cancel."]], header=False, widths=(0.12, 0.88)),
     H("Notes"), P("There is no direct command: JARVIS uses the Notes app through app control."),
-    H("Briefing"), P("“Good morning Jarvis” asks for a summary with weather, appointments, reminders, unread mail, study and projects. It also starts by itself: see the Initiative chapter."))
+    H("Briefing"), P("“Good morning Jarvis” asks for a summary with weather, appointments, reminders, unread mail, study and projects. It also starts by itself: see the Initiative chapter. Mail answers slowly: the briefing waits for it at most 5 seconds, then goes on without it. When the briefing starts by itself, JARVIS gathers the data while it answers the first request, so the mail arrives in time."))
 
 section("initiative", "Initiative: Jarvis speaks first", "Initiative", "Jarvis warns you without being asked.",
     table([["Alert", "When"],
@@ -207,7 +208,7 @@ section("initiative", "Initiative: Jarvis speaks first", "Initiative", "Jarvis w
            ["Briefing", "At the first activation of the day between 5 and 12: it answers first, then gives the briefing. Once a day."]], widths=(0.22, 0.78)),
     H("When it waits"), P("Alerts stay queued if JARVIS is in privacy mode, in a conversation or with a pending confirmation, and during quiet hours (from 23:00 to 8:00). Those no longer relevant are dropped: an appointment that already started is not announced. Alerts already given are not repeated after a restart."),
     H("Adjusting them"), P("Settings › Initiative: every alert has its own switch, and you can change the quiet hours."),
-    callout("Bambu Studio", "With the printer configured in Settings, JARVIS warns if the print finishes, pauses or gets stuck, and answers “how is the print going?”. It can also load and unload filament and print, always through Bambu Studio’s buttons.", warn=False))
+    callout("Bambu Studio", "With the printer configured in Settings, JARVIS warns if the print finishes, pauses or gets stuck, and answers “how is the print going?”. If the printer is off or has a new address, JARVIS looks for it on the network less and less often, up to once every half hour, and never during quiet hours or in privacy mode; when you ask about it, it looks at once. It can also load and unload filament and print, always through Bambu Studio’s buttons.", warn=False))
 
 section("study", "Study, projects and memory", "Study, projects and memory", "Measuring time, reading the state of projects and saving facts.",
     table([["Request", "Result"],
@@ -232,6 +233,7 @@ section("protocols", "Protocols, quizzes and flashcards", "Protocols and review"
            ["“Fine studio” (end of study)", "Closes the session, cancels the timer and says how long you studied."],
            ["“Buongiorno” (good morning)", "Weather, schedule, reminders, mail and any print in progress."],
            ["“Buonanotte” (good night)", "Closes the session, says what you have tomorrow and then turns off the screen. It does not quit apps."]], widths=(0.3, 0.7)),
+    P("You can add your own in protocolli.json: the phrases, the tools to run before and after, and in “chiedi” the request for the model, even a sequence of steps in an app. With “sintetico”: true it is a sequence of actions: JARVIS acknowledges at once and speaks only at the end."),
     H("Quizzes and flashcards"),
     P("“Quiz me on Chemistry” asks one question at a time taken from your notes, corrects you citing the file and gives the score at the end. “Make flashcards on Fourier series” saves them with their source: without a source in the notes a card is not added. “Let’s review the flashcards” brings back the ones due: answer well and they come back later and later, get them wrong and they come back tomorrow. They live in schede.json, only on the Mac."))
 

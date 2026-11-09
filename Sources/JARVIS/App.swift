@@ -52,7 +52,10 @@ struct JarvisApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let assistant = Assistant()
     private var window: HUDWindow?
-    private var reactor: ReactorPanel?
+    /// One NUCLEUS for every connected display.
+    private var reactors: [CGDirectDisplayID: ReactorPanel] = [:]
+    /// The NUCLEUS hidden under the open HUD: the HUD grew out of it.
+    private var hudNucleus: ReactorPanel?
     /// Prevents App Nap from slowing JARVIS down in standby: it must keep
     /// listening for "Jarvis" and keep the NUCLEUS in front of the wallpaper.
     private var awake: NSObjectProtocol?
@@ -70,10 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           onWindowDrag: { [weak self] ended in self?.window?.followMouse(ended: ended) })
         let window = HUDWindow(content: hud)
         self.window = window
-        let reactor = ReactorPanel(assistant: assistant) { [weak self] in self?.showHUD() }
-        self.reactor = reactor
-        // At launch too, the large reactor sits exactly over the NUCLEUS.
-        window.place(reactorCenter: NSPoint(x: reactor.frame.midX, y: reactor.frame.midY))
+        updateReactors()
+        // Displays connected, disconnected or rearranged: one NUCLEUS each, always.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
+                                               queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.updateReactors() }
+        }
 
         NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window,
                                                queue: .main) { [weak self] _ in
@@ -82,17 +87,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.assistant.hudVisible = window.occlusionState.contains(.visible)
             }
         }
-        NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: reactor,
-                                               queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let reactor = self.reactor else { return }
-                self.assistant.compactVisible = reactor.occlusionState.contains(.visible)
-            }
-        }
 
         // Windows are shown only after registering the visibility observers,
         // otherwise the first change is lost and the animation stays still.
-        if compactMode { showCompact() } else { showHUD() }
+        reactors.values.forEach { $0.orderFrontRegardless() }
+        if !compactMode, let nucleus = nucleus(on: NSScreen.main) {
+            // At launch the large reactor sits exactly over the NUCLEUS of the main display.
+            window.place(reactorCenter: NSPoint(x: nucleus.frame.midX, y: nucleus.frame.midY))
+            nucleus.orderOut(nil)
+            hudNucleus = nucleus
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+        }
+        updateCompactVisible()
         assistant.boot()
         enableLaunchAtLoginOnce()
         awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
@@ -122,16 +129,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Creates a NUCLEUS for each new display and removes those of disconnected ones.
+    private func updateReactors() {
+        let screens = NSScreen.screens
+        let ids = Set(screens.map(\.displayID))
+        for (id, panel) in reactors where !ids.contains(id) {
+            if hudNucleus === panel { hudNucleus = nil }
+            panel.tearDown()
+            reactors[id] = nil
+        }
+        for screen in screens where reactors[screen.displayID] == nil {
+            let panel = ReactorPanel(assistant: assistant, screen: screen) { [weak self] nucleus in self?.showHUD(from: nucleus) }
+            NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: panel,
+                                                   queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.updateCompactVisible() }
+            }
+            reactors[screen.displayID] = panel
+            // A display connected while running shows its NUCLEUS at once.
+            if window != nil { panel.orderFrontRegardless() }
+        }
+        for panel in reactors.values where panel.isVisible { panel.keepOnOwnScreen() }
+    }
+
+    /// The small reactors animate only while at least one of them can be seen.
+    private func updateCompactVisible() {
+        assistant.compactVisible = reactors.values.contains { $0.isVisible && $0.occlusionState.contains(.visible) }
+    }
+
+    private func nucleus(on screen: NSScreen?) -> ReactorPanel? {
+        screen.flatMap { reactors[$0.displayID] } ?? reactors.values.first
+    }
+
+    /// The display under the mouse pointer: menu bar and Dock open the HUD there.
+    private var screenAtMouse: NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+    }
+
+    /// Opens the HUD from a NUCLEUS. If the HUD is already open on another display,
+    /// it first shrinks into the NUCLEUS of that display, then opens here.
+    func showHUD(from source: ReactorPanel? = nil) {
+        guard let window else { return }
+        if window.isVisible {
+            compactMode = false
+            guard let source, let current = hudNucleus ?? nucleus(on: window.screen), source !== current else {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate()
+                return
+            }
+            showCompact { [weak self] in self?.openHUD(from: source) }
+            return
+        }
+        openHUD(from: source ?? nucleus(on: screenAtMouse))
+    }
+
     /// From NUCLEUS to HUD: the window grows starting from the NUCLEUS.
-    func showHUD() {
+    private func openHUD(from reactor: ReactorPanel?) {
         compactMode = false
         guard let window, let reactor, reactor.isVisible, !window.isVisible else {
-            reactor?.orderOut(nil)
-            assistant.compactVisible = false
             self.window?.makeKeyAndOrderFront(nil)
             NSApp.activate()
             return
         }
+        hudNucleus = reactor
         let center = NSPoint(x: reactor.frame.midX, y: reactor.frame.midY)
         // The large reactor opens exactly around the NUCLEUS, like a magnification of it.
         window.place(reactorCenter: center)
@@ -141,26 +200,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reactor.animator().alphaValue = 0
         } completionHandler: {
             Task { @MainActor in
-                reactor.orderOut(nil)
+                // Another click may have opened the HUD elsewhere in the meantime.
+                if self.hudNucleus === reactor { reactor.orderOut(nil) }
                 reactor.alphaValue = 1
-                self.assistant.compactVisible = false
+                self.updateCompactVisible()
             }
         }
         NSApp.activate()
     }
 
-    /// From HUD to NUCLEUS: the window shrinks into the NUCLEUS.
-    func showCompact() {
+    /// From HUD to NUCLEUS: the window shrinks into the NUCLEUS of the display it is on.
+    /// `then` runs when the NUCLEUS is back (used to reopen the HUD on another display).
+    func showCompact(then: (() -> Void)? = nil) {
         compactMode = true
+        let reactor = nucleus(on: window?.screen) ?? hudNucleus
+        // Every other NUCLEUS is back too: one per display, always.
+        for panel in reactors.values where panel !== reactor && !panel.isVisible {
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+        }
+        hudNucleus = nil
         guard let window, let reactor, window.isVisible else {
             self.window?.orderOut(nil)
             reactor?.orderFrontRegardless()
-            assistant.compactVisible = true
+            updateCompactVisible()
+            then?()
             return
         }
         reactor.alphaValue = 0
         reactor.orderFrontRegardless()
-        assistant.compactVisible = true
+        updateCompactVisible()
         let center = NSPoint(x: reactor.frame.midX, y: reactor.frame.midY)
         zoom(window, toward: center, opening: false)
         // The NUCLEUS appears while the HUD finishes shrinking.
@@ -169,6 +238,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 context.duration = 0.1
                 reactor.animator().alphaValue = 1
             }
+        }
+        if let then {
+            // After the shrinking (0.16 s) has hidden the window, so the two animations do not overlap.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { then() }
         }
     }
 

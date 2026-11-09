@@ -1,0 +1,41 @@
+
+import Combine
+
+@main struct SpherePreviewApp: App {
+    @StateObject private var assistant = Assistant()
+    @State private var compact = false
+    @State private var paused = false
+    private let meter = Timer.publish(every: 1.0 / 30, on: .main, in: .common).autoconnect()
+    var body: some Scene {
+        WindowGroup("JARVIS — test isolato sfera") {
+            VStack(spacing: 8) {
+                HStack {
+                    Button("Attesa") { assistant.state = .idle }
+                    Button("Ascolta") { assistant.state = .listening }
+                    Button("Pensa") { assistant.state = .thinking }
+                    Button("Parla") { assistant.state = .speaking }
+                }
+                HStack {
+                    Toggle("Compatta", isOn: $compact)
+                    Toggle("Pausa", isOn: $paused)
+                    Toggle("Privacy", isOn: $assistant.privacyMode)
+                }.toggleStyle(.checkbox)
+                ZStack {
+                    HUD.background
+                    ReactorView(assistant: assistant, compact: compact, paused: paused)
+                        .frame(width: compact ? 154 : 490, height: compact ? 154 : 490)
+                }.frame(width: 550, height: 530)
+                Text("TEST GRAFICO · livelli sintetici · nessun microfono o TTS")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .onReceive(meter) { date in
+                let t = date.timeIntervalSinceReferenceDate
+                assistant.levels.mic = Float(pow(max(0, sin(t*3)),2) * 0.85)
+                let syllable: Double = 0.5 + 0.5 * sin(t * 13.0)
+                let envelope: Double = 0.45 + 0.45 * sin(t * 2.0)
+                assistant.levels.voice = Float(syllable * envelope)
+            }
+        }.windowResizability(.contentSize)
+    }
+}

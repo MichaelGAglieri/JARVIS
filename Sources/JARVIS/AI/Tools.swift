@@ -87,7 +87,7 @@ final class ToolBox {
     }
 
     /// The Bambu printer's state, already as a sentence.
-    var printerStatus: ((Bool) -> String)?
+    var printerStatus: ((Bool) async -> String)?
     /// Printer commands, through Bambu Studio.
     var printerFilament: ((_ load: Bool) async -> String)?
     var printerPrint: ((_ model: String?) async -> ToolOutcome)?
@@ -201,6 +201,9 @@ final class ToolBox {
              ["app": str("App name"), "element": str("Field number"), "text": str("Text to type"), "submit": bool("Press Return afterwards"), "consequential": bool("Only for a dangerous robot movement: asks confirmation")], required: ["app", "element", "text"]),
         tool("app_key", "Press a key or shortcut in an app, e.g. pagedown, escape, cmd+f. Only Delete and sending shortcuts ask confirmation.",
              ["app": str("App name"), "key": str("Key, e.g. down, pagedown, cmd+f"), "consequential": bool("Only for a dangerous robot movement: asks confirmation")], required: ["app", "key"]),
+        tool("app_scroll", "Scroll an app's window (its main scrollable area) when what you need is not in app_read: apps list only what is on screen. Then app_read again.",
+             ["app": str("App name"), "direction": str("down, up, top or bottom"), "pages": str("How much, 1 to 4 (default 1 = a quarter of the page)"),
+              "element": str("Optional: an element number from app_read; scrolls the list that contains it instead of the whole page")], required: ["app"]),
         tool("app_look", "Look at an app's window as an image, only when app_read shows nothing useful (apps that don't expose their controls).",
              ["app": str("App name")], required: ["app"]),
         tool("app_click_at", "Click a point of the image from the latest app_look. It asks confirmation only if what describes buying, sending, deleting, installing or granting permissions, so describe the target truthfully.",
@@ -335,7 +338,14 @@ final class ToolBox {
         case "recent_project_activity": return .result(await ProjectInsights.recentActivity(a))
         case "daily_briefing":
             onBriefing?()
-            return .result(Security.external("briefing (mail, calendario, meteo)", await briefing()))
+            // Gathered in advance while JARVIS answered the first request of the day, if recent.
+            let ready = preparedBriefing.flatMap { Date().timeIntervalSince($0.since) < 600 ? $0.task : nil }
+            preparedBriefing = nil
+            let text: String
+            let start = Date()
+            if let ready { text = await ready.value } else { text = await briefing(mailWait: 5) }
+            Diagnostics.log("briefing  dati \(ready != nil ? "raccolti in anticipo" : "raccolti ora") [\(Diagnostics.since(start))]")
+            return .result(Security.external("briefing (mail, calendario, meteo)", text))
         case "run_shortcut":
             // A Shortcut can do anything (even delete files).
             let name = a.string("name") ?? "?"
@@ -436,6 +446,7 @@ final class ToolBox {
             case "app_type": return await appControl.type(a)
             case "app_key": return await appControl.key(a)
             case "app_look": return await appControl.look(a)
+            case "app_scroll": return .result(await appControl.scroll(a))
             case "app_click_at": return await appControl.clickAt(a)
             default: return .result("Strumento sconosciuto: \(name)")
             }
@@ -472,7 +483,7 @@ final class ToolBox {
             let baud = Int(a.number("baud") ?? 115_200), seconds = min(a.number("seconds") ?? 4, 15)
             return .result(Security.external("porta seriale", await ArduinoActions.readSerial(port: port, baud: baud, seconds: seconds)))
         case "bambu_open": return .result(await BambuActions.open(a))
-        case "printer_status": return .result(printerStatus?(currentLanguage == .italian) ?? "Stampante non configurata.")
+        case "printer_status": return .result(await printerStatus?(currentLanguage == .italian) ?? "Stampante non configurata.")
         case "search_notes":
             guard let query = a.string("query"), !query.isEmpty else { return .result("Cosa devo cercare negli appunti?") }
             let subject = a.string("subject")
@@ -492,12 +503,22 @@ final class ToolBox {
         }
     }
 
-    private func briefing() async -> String {
+    private var preparedBriefing: (since: Date, task: Task<String, Never>)?
+
+    /// The morning briefing is coming: weather, mail and calendar are read now,
+    /// so the briefing does not wait for them afterwards.
+    func prepareBriefing() {
+        guard preparedBriefing == nil || Date().timeIntervalSince(preparedBriefing!.since) > 600 else { return }
+        preparedBriefing = (Date(), Task { await self.briefing(mailWait: 15) })
+    }
+
+    /// Mail takes about ten seconds to answer: gathered in advance it gets more time, otherwise at most `mailWait`.
+    private func briefing(mailWait: Double) async -> String {
         async let weather = WebActions.weather([:])
         async let events = calendar.listEvents([:])
         async let reminders = calendar.listReminders([:])
         // If Mail is slow the briefing does not wait for it.
-        async let mail = MailActions.listUnread(["limit": 5, "timeout": 10.0])
+        async let mail = MailActions.listUnread(["limit": 5, "timeout": mailWait])
         async let projects = ProjectInsights.recentActivity(["days": 3])
         let study = activity.report(period: "yesterday", category: "study")
         let week = ActivityTracker.spoken(activity.total(from: Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date(),

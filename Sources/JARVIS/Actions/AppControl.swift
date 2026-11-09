@@ -327,6 +327,58 @@ final class AppControl {
         if let key = Self.parseKey("cmd+w") { _ = await performKey(key, combo: "cmd+w", app: app) }
     }
 
+    /// Scrolls the window's main area (the largest scrollable area) without keys or clicks:
+    /// many apps show their controls only when they are on screen, so app_read finds them only after scrolling.
+    func scroll(_ args: [String: Any]) async -> String {
+        let (found, problem) = target(args.string("app"))
+        guard let app = found else { return problem ?? "App non disponibile." }
+        guard !halted else { return "Interrotto dall'utente." }
+        guard let window = Self.window(of: app) else { return "Non trovo la finestra di \(MacActions.displayName(app))." }
+        var areas: [AXUIElement] = []
+        // With an element: the list that contains it (a list inside the page scrolls on its own).
+        if args.string("element") != nil {
+            guard let inside = element(args, in: app) else { return Self.staleElement }
+            var node: AXUIElement? = inside.ax
+            for _ in 0..<20 {
+                guard let current = node else { break }
+                if Self.string(current, kAXRoleAttribute) == "AXScrollArea", Self.element(current, kAXVerticalScrollBarAttribute) != nil {
+                    areas = [current]
+                    break
+                }
+                node = Self.element(current, kAXParentAttribute)
+            }
+            guard !areas.isEmpty else { return "Quell'elemento non è dentro un'area che scorre: scorri la pagina senza element." }
+        } else {
+            Self.collectScrollAreas(window, depth: 0, into: &areas)
+        }
+        let sized = areas.compactMap { area -> (AXUIElement, AXUIElement, CGFloat)? in
+            guard let bar = Self.element(area, kAXVerticalScrollBarAttribute), let f = Self.frame(area) else { return nil }
+            return (area, bar, f.width * f.height)
+        }
+        guard let (_, bar, _) = sized.max(by: { $0.2 < $1.2 }) else { return "In questa finestra non c'è niente da scorrere." }
+        let current = (Self.attribute(bar, kAXValueAttribute) as? NSNumber)?.doubleValue ?? 0
+        let step = 0.25 * max(1, min(args.number("pages") ?? 1, 4))
+        let direction = args.string("direction")?.lowercased() ?? "down"
+        let target: Double
+        switch direction {
+        case "top", "inizio": target = 0
+        case "bottom", "fine": target = 1
+        case "up", "su": target = max(0, current - step)
+        default: target = min(1, current + step)
+        }
+        let error = AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: target))
+        guard error == .success else { return "Non riesco a scorrere: prova app_key pagedown dopo aver cliccato nell'area." }
+        try? await Task.sleep(for: .milliseconds(400))
+        let place = target <= 0.001 ? "in cima" : target >= 0.999 ? "in fondo" : "al \(Int(target * 100))%"
+        return "Scorso \(place). Rileggi con app_read per vedere cosa c'è ora."
+    }
+
+    private static func collectScrollAreas(_ node: AXUIElement, depth: Int, into areas: inout [AXUIElement]) {
+        guard depth < 12, areas.count < 40 else { return }
+        if string(node, kAXRoleAttribute) == "AXScrollArea" { areas.append(node) }
+        for child in children(node) { collectScrollAreas(child, depth: depth + 1, into: &areas) }
+    }
+
     private func performKey(_ parsed: (CGKeyCode, CGEventFlags), combo: String, app: NSRunningApplication) async -> String {
         guard !halted else { return "Interrotto dall'utente." }
         guard await bringToFront(app) else { return "Errore: non sono riuscito a portare davanti l'app." }

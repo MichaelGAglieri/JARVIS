@@ -1,0 +1,117 @@
+
+@main struct SphereValidation {
+    @MainActor static func main() throws {
+        precondition(MemoryLayout<SphereUniforms>.stride == 128)
+        precondition(MemoryLayout<SphereSegment>.stride == 48)
+        precondition(MemoryLayout<SpherePoint>.stride == 32)
+        guard let gpu = SphereGPU.shared else { fatalError("Metal setup failed") }
+        print("DEVICE \(gpu.device.name)")
+        print("FULL segments=\(gpu.full.segmentCount) points=\(gpu.full.pointCount)")
+        print("COMPACT segments=\(gpu.small.segmentCount) points=\(gpu.small.pointCount)")
+        let again = SphereGeometry(compact: false)
+        precondition(again.segments.map(\.a) == SphereGeometry.full.segments.map(\.a))
+        precondition(again.points.map(\.position) == SphereGeometry.full.points.map(\.position))
+        precondition(SphereGeometry.full.segments.allSatisfy { s in
+            [s.a.x,s.a.y,s.a.z,s.b.x,s.b.y,s.b.z].allSatisfy { $0.isFinite && abs($0) <= 1.1 }
+        })
+        // Smoothness: a whole voice exchange at 30 fps, with a noisy voice level.
+        // No value the shader uses may jump from one frame to the next.
+        do {
+            let animator = ReactorAnimator(), motion = SphereMotion(), start = Date()
+            let script: [(Assistant.State, Int)] = [(.idle, 60), (.listening, 90), (.transcribing, 30), (.thinking, 90),
+                                                     (.acting, 45), (.speaking, 150), (.thinking, 30), (.speaking, 90), (.idle, 90)]
+            var frame = 0, previous: SphereUniforms?
+            var worst = (flow: 0.0, scale: 0.0, density: 0.0, level: 0.0, spin: 0.0, fire: 0.0)
+            var noise = SeededRandom(seed: 99)
+            for (state, frames) in script {
+                for _ in 0..<frames {
+                    let date = start.addingTimeInterval(Double(frame) / 30)
+                    frame += 1
+                    let mic: Float = state == .listening ? Float(noise.next()) : 0
+                    let voice: Float = state == .speaking ? Float(noise.next()) : 0
+                    animator.step(date, state: state, deepIdle: false, privacy: false, mic: mic, voice: voice)
+                    precondition(motion.step(date, state: state, animator: animator))
+                    precondition(!motion.step(date, state: state, animator: animator), "Same date must not redraw")
+                    let u = SphereUniforms(animator: animator, state: state, compact: false, motion: motion)
+                    if let p = previous {
+                        var df = abs(Double(u.state.w - p.state.w)); df = min(df, 1 - df) // wraps at 1
+                        worst.flow = max(worst.flow, df)
+                        worst.scale = max(worst.scale, abs(Double(u.dynamics.x - p.dynamics.x)))
+                        worst.density = max(worst.density, abs(Double(u.dynamics.w - p.dynamics.w)))
+                        worst.level = max(worst.level, abs(Double(u.motion.w - p.motion.w)))
+                        worst.spin = max(worst.spin, abs(Double(u.motion.y - p.motion.y)))
+                        worst.fire = max(worst.fire, abs(Double(u.dynamics.z - p.dynamics.z)))
+                    }
+                    previous = u
+                }
+            }
+            print(String(format: "SMOOTH max step per frame: flow %.4f, scale %.4f, density %.4f, level %.4f, spin %.4f, fire %.4f",
+                         worst.flow, worst.scale, worst.density, worst.level, worst.spin, worst.fire))
+            precondition(worst.flow < 0.02 && worst.scale < 0.012 && worst.density < 0.11 && worst.level < 0.35
+                         && worst.spin < 0.1 && worst.fire < 0.06,
+                         "A state change makes the sphere jump")
+        }
+        let cases: [(String, Assistant.State, Float, Float, Bool, Bool)] = [
+            ("idle",.idle,0,0,false,false),
+            ("deep-idle",.idle,0,0,false,false),
+            ("booting",.booting("test"),0,0,false,false),
+            ("listening",.listening,0.75,0,false,false),
+            ("thinking",.thinking,0,0,false,false),
+            ("speaking",.speaking,0,0.8,false,false),
+            ("transcribing",.transcribing,0,0,false,false),
+            ("acting",.acting,0,0,false,false),
+            ("error",.error("test"),0,0,false,false),
+            ("privacy",.idle,0,0,true,false),
+            ("compact",.idle,0,0,false,true)
+        ]
+        for (name,state,mic,voice,privacy,compact) in cases {
+            let animator = ReactorAnimator(), start = Date()
+            for i in 0..<(name == "booting" ? 16 : 240) {
+                animator.step(start.addingTimeInterval(Double(i)/30), state: state, deepIdle: name == "deep-idle",
+                              privacy: privacy, mic: mic, voice: voice)
+            }
+            if name == "deep-idle" { precondition(animator.speed < 0.03) }
+            if name == "privacy" { precondition(animator.privacy > 0.99) }
+            if name == "error" { precondition(animator.alert > 0.99) }
+            var uniforms=SphereUniforms(animator: animator,state:state,compact:compact)
+            let size=compact ? 308 : 980
+            uniforms.viewport=SIMD4(Float(size),Float(size),2,0)
+            let descriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.bgra8Unorm,width:size,height:size,mipmapped:false)
+            descriptor.usage=[.renderTarget]; descriptor.storageMode = .shared
+            let texture=gpu.device.makeTexture(descriptor:descriptor)!
+            var times:[Double]=[]
+            for frame in 0..<40 {
+                let pass=MTLRenderPassDescriptor()
+                pass.colorAttachments[0].texture=texture
+                pass.colorAttachments[0].loadAction = .clear
+                pass.colorAttachments[0].storeAction = .store
+                pass.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,0)
+                let command=gpu.queue.makeCommandBuffer()!
+                gpu.encode(command:command,pass:pass,uniforms:uniforms,compact:compact)
+                command.commit(); command.waitUntilCompleted()
+                precondition(command.status == .completed, "\(String(describing:command.error))")
+                if frame>=10 { times.append((command.gpuEndTime-command.gpuStartTime)*1000) }
+            }
+            var bytes=[UInt8](repeating:0,count:size*size*4)
+            texture.getBytes(&bytes,bytesPerRow:size*4,from:MTLRegionMake2D(0,0,size,size),mipmapLevel:0)
+            precondition(bytes[3] == 0, "Background must be transparent")
+            precondition(bytes.enumerated().contains { $0.offset%4 == 3 && $0.element>0 },"Blank render")
+            // Show the render against HUD.background. Metal output is premultiplied.
+            for i in stride(from:0,to:bytes.count,by:4) {
+                let alpha=Double(bytes[i+3])/255
+                let b=bytes[i],r=bytes[i+2]
+                bytes[i]=UInt8(min(255,Double(r)+2.55*(1-alpha)))
+                bytes[i+1]=UInt8(min(255,Double(bytes[i+1])+10.2*(1-alpha)))
+                bytes[i+2]=UInt8(min(255,Double(b)+20.4*(1-alpha)))
+                bytes[i+3]=255
+            }
+            let rep=NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:size,pixelsHigh:size,bitsPerSample:8,
+                samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:size*4,bitsPerPixel:32)!
+            bytes.withUnsafeBytes { rep.bitmapData!.update(from:$0.baseAddress!.assumingMemoryBound(to:UInt8.self),count:bytes.count) }
+            try rep.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:"\(CommandLine.arguments[1])/\(name).png"))
+            times.sort()
+            print("\(name): GPU median \(String(format:"%.3f",times[times.count/2])) ms; p95 \(String(format:"%.3f",times[Int(Double(times.count)*0.95)])) ms")
+        }
+        print("PASS: deterministic geometry, buffer alignment, all states, transparency, Metal draws")
+    }
+}

@@ -400,6 +400,11 @@ final class Assistant: ObservableObject {
     /// How the first pass understood the phrase: sometimes it is right exactly where
     /// the full transcription is wrong ("avrei whatsapp" versus "avrighozzotto").
     private var alternativeTranscript: String?
+    /// The whole phrase when "Jarvis" was in the middle of it: perhaps he was talking about JARVIS to someone else.
+    private var namedMidPhrase: String?
+    /// This answer may be just `silentReply`: JARVIS then says nothing.
+    private var silenceAllowed = false
+    private static let silentReply = "SILENZIO"
 
     /// Someone who pauses after "Jarvis" is split into two phrases, and a lone "Jarvis"
     /// can come out of Whisper empty: the command was lost and had to be repeated.
@@ -745,7 +750,15 @@ final class Assistant: ObservableObject {
             guard let self else { return }
             self.initiative.alert(id: id, text: self.language == .italian ? italian : english)
         }
-        tools.printerStatus = { [weak self] italian in self?.printer.spokenStatus(italian: italian) ?? "" }
+        tools.printerStatus = { [weak self] italian in
+            guard let self else { return "" }
+            await self.printer.reachNow()
+            return self.printer.spokenStatus(italian: italian)
+        }
+        printer.maySearch = { [weak self] in
+            guard let self else { return false }
+            return !self.privacyMode && !self.initiative.isQuietTime
+        }
         printerControl.onFinished = { [weak self] id, italian, english in
             guard let self else { return }
             self.initiative.alert(id: id, text: self.language == .italian ? italian : english)
@@ -753,6 +766,7 @@ final class Assistant: ObservableObject {
         tools.printerFilament = { [weak self] load in await self?.printerControl.filament(load: load) ?? "Non disponibile." }
         tools.printerPrint = { [weak self] model in await self?.printerControl.preparePrint(model: model) ?? .result("Non disponibile.") }
         initiative.startBriefing = { [weak self] in self?.startMorningBriefing() }
+        initiative.prepareBriefing = { [weak self] in self?.tools.prepareBriefing() }
         initiative.studySession = { [weak self] in self?.activity.current }
         tools.onBriefing = { [weak self] in self?.initiative.briefingDone() }
         tools.onUnloadModel = { [weak self] in await self?.unloadLocalModel() ?? "Non disponibile." }
@@ -882,9 +896,11 @@ final class Assistant: ObservableObject {
                 guard !Task.isCancelled else { return }
                 Diagnostics.log("frase     [\(Diagnostics.since(start))\(early != nil ? ", anticipata" : "")] \"\(text)\" (\(lang == .italian ? "it" : "en"))")
                 var command = text
+                namedMidPhrase = nil
                 if needsWakeCheck {
                     if let extracted = WakeVerifier.command(from: text) {
                         command = extracted
+                        if WakeVerifier.isNamedMidPhrase(text) { namedMidPhrase = text }
                     } else if wakeConfirmed, let extracted = WakeVerifier.command(from: text, loose: true) {
                         // The small Whisper already heard "Jarvis": if the large one
                         // spells it oddly ("Charvis", "Jervis") it still counts.
@@ -1052,20 +1068,31 @@ final class Assistant: ObservableObject {
         if await runProtocol(command, language: lang) { return }
         if await runInstantCommand(command, language: lang) { return }
         if let alternative, alternative != command, await runInstantCommand(alternative, language: lang) { return }
-        acknowledge(command, language: lang, forClaude: brain == .claude && online)
+        // "Mi sa che Jarvis ti ha dato ragione": said about JARVIS, to someone else. No acknowledgment:
+        // the model reads the whole phrase and, if it is not addressed to it, answers only with silence.
+        var asked = command
+        if let whole = namedMidPhrase {
+            asked = "[\"Jarvis\" was in the middle of what he said: \"\(whole)\". If he is talking about you to someone else, "
+                + "not to you, reply with exactly \(Self.silentReply) and nothing else. If he is speaking to you, answer normally.]\n" + command
+            silenceAllowed = true
+        } else {
+            acknowledge(command, language: lang, forClaude: brain == .claude && online)
+        }
+        defer { silenceAllowed = false; namedMidPhrase = nil }
+        let brief = Acknowledgment.kind(of: command) == .action
         if brain == .claude && online {
-            await respondWithClaude(command, language: lang)
+            await respondWithClaude(asked, language: lang, brief: brief)
             return
         }
         // Memory almost full and model not loaded: Claude answers, if connected.
         if memoryTooLowForModel, claudeStatus.hasSuffix("COLLEGATO"), !(await ollama.isLoaded()) {
             note("Memoria quasi piena: rispondo con Claude")
             Diagnostics.log("memoria   libera al \(MemoryGuard.freePercent)%: risposta con Claude invece di ricaricare il modello")
-            await respondWithClaude(command, language: lang)
+            await respondWithClaude(asked, language: lang, brief: brief)
             return
         }
         let failedBefore = tools.failedLookups
-        await respondLocally(command, language: lang)
+        await respondLocally(asked, language: lang, brief: brief)
         await checkUnderstanding(command, failed: tools.failedLookups > failedBefore, language: lang)
     }
 
@@ -1111,8 +1138,11 @@ final class Assistant: ObservableObject {
             return results
         }
         let results = await run(item.before)
-        if let ask = item.ask {
-            if brain == .claude && online { await respondWithClaude(ask, language: lang) } else { await respondLocally(ask, language: lang) }
+        // In "chiedi" {resto} is the rest of the phrase as said: "esegui la sequenza allineamento" → "allineamento".
+        if let ask = item.ask?.replacingOccurrences(of: "{resto}", with: rest) {
+            // A sequence of actions: "Procedo, signore" at once, then silence until the end.
+            if item.brief { acknowledge(command, language: lang, forClaude: brain == .claude && online) }
+            if brain == .claude && online { await respondWithClaude(ask, language: lang, brief: item.brief) } else { await respondLocally(ask, language: lang, brief: item.brief) }
         } else {
             say((item.reply ?? "Fatto, signore.").replacingOccurrences(of: "{esito}", with: results.first ?? "Fatto, signore."), language: lang)
         }
@@ -1147,6 +1177,7 @@ final class Assistant: ObservableObject {
             mustSayText = true
         case .printerStatus:
             guard printer.isConfigured else { return false }
+            await printer.reachNow()
             text = printer.spokenStatus(italian: italian)
             mustSayText = true
         case .filament(let load):
@@ -1238,7 +1269,7 @@ final class Assistant: ObservableObject {
     }
 
     /// Answer with the local model (Ollama) and JARVIS's tools.
-    private func respondLocally(_ command: String, language lang: Language) async {
+    private func respondLocally(_ command: String, language lang: Language, brief: Bool = false) async {
         answering = .local
         state = .thinking
         reply = ""
@@ -1255,6 +1286,11 @@ final class Assistant: ObservableObject {
         tools.currentCommand = command
         tools.currentLanguage = lang
         var spoken = ""
+        var acting = brief
+        var held: [String] = []
+        func say(_ sentence: String) {
+            if acting { held.append(sentence) } else { speakSentence(sentence, lang) }
+        }
 
         do {
             // The model can ask for several tools in a row (e.g. find the
@@ -1270,13 +1306,20 @@ final class Assistant: ObservableObject {
                     case .text(let chunk):
                         text += chunk
                         reply = Self.visible(spoken + " " + text)
-                        for sentence in splitter.push(chunk) { speakSentence(sentence, lang) }
+                        for sentence in splitter.push(chunk) { say(sentence) }
                     case .toolCalls(let parsed, let raw):
                         calls += parsed
                         rawCalls += raw
                     }
                 }
-                if let rest = splitter.flush() { speakSentence(rest, lang) }
+                if let rest = splitter.flush() { say(rest) }
+                if calls.isEmpty, spoken.isEmpty, stayedSilent(text) { return }
+                if calls.contains(where: { Self.acts($0.name) }) { acting = true }
+                if acting, !calls.isEmpty, !held.isEmpty {
+                    Diagnostics.log("breve     \(held.count) frasi di cronaca non dette")
+                    held.removeAll()
+                }
+                if calls.isEmpty { for sentence in held { speakSentence(sentence, lang) } }
                 spoken += " " + text
 
                 var message: ChatMessage = ["role": "assistant", "content": Self.visible(text)]
@@ -1492,8 +1535,24 @@ final class Assistant: ObservableObject {
 
     /// Answer with Claude through Claude Code. If Claude cannot be reached
     /// (expired login, no network…) the local model answers.
+    /// Tools that only read: what they find is told. app_read and app_look serve the actions.
+    /// Every other tool acts: while it acts JARVIS does not narrate, the voice would arrive after the action.
+    private static let readingTools: Set<String> = [
+        "list_running_apps", "system_status", "review_flashcards", "flashcards_summary", "search_files", "list_projects", "list_shortcuts",
+        "list_events", "list_reminders", "list_unread_emails", "search_emails", "read_email", "web_search", "read_webpage", "get_weather",
+        "list_memories", "activity_report", "project_info", "recent_project_activity", "daily_briefing", "ros_graph", "ros_echo", "lab_status",
+        "robot_status", "look_at_screen", "look_at_camera", "arduino_boards", "serial_read", "printer_status", "search_notes", "list_timers",
+        "WebSearch", "Read", "Grep", "Glob", "LS", "app_read", "app_look", "app_scroll",
+    ]
+
+    private static func acts(_ tool: String) -> Bool {
+        !readingTools.contains(tool.replacingOccurrences(of: "mcp__jarvis__", with: ""))
+    }
+
+    /// Brief: an action. The sentences said between one step and the next are dropped (they would describe
+    /// something already done); only the last one is said, usually "Fatto, signore.".
     private func respondWithClaude(_ command: String, language lang: Language, model: String? = nil,
-                                   effort: String? = nil, learning: Bool = false) async {
+                                   effort: String? = nil, learning: Bool = false, brief: Bool = false) async {
         answering = .claude
         if let model {
             claude.model = model
@@ -1522,6 +1581,11 @@ final class Assistant: ObservableObject {
         }
         var splitter = SentenceSplitter()
         var full = ""
+        var acting = brief
+        var held: [String] = []
+        func say(_ sentence: String) {
+            if acting { held.append(sentence) } else { speakSentence(sentence, lang) }
+        }
         do {
             for try await event in claude.ask(prompt, systemPrompt: Persona.claudePrompt(config: config, memory: memory.promptBlock), mcpConfig: mcp.claudeConfig) {
                 if Task.isCancelled { return }
@@ -1530,18 +1594,23 @@ final class Assistant: ObservableObject {
                     full += chunk
                     reply = Self.visible(Self.withoutVocabulary(full))
                     // The final "VOCABOLARIO: …" line is for JARVIS, it is not read aloud.
-                    for sentence in splitter.push(chunk) where !full.contains(Self.vocabularyMarker) {
-                        speakSentence(sentence, lang)
-                    }
+                    for sentence in splitter.push(chunk) where !full.contains(Self.vocabularyMarker) { say(sentence) }
                 case .tool(let name):
                     // Text before and after a tool are separate sentences.
                     full += "\n"
-                    for sentence in splitter.push("\n") { speakSentence(sentence, lang) }
+                    for sentence in splitter.push("\n") { say(sentence) }
+                    if Self.acts(name) { acting = true }
+                    if acting, !held.isEmpty {
+                        Diagnostics.log("breve     \(held.count) frasi di cronaca non dette")
+                        held.removeAll()
+                    }
                     note("☁︎ \(name.replacingOccurrences(of: "mcp__jarvis__", with: ""))")
                     if !speech.isSpeaking { state = .acting }
                 }
             }
-            if let rest = splitter.flush(), !full.contains(Self.vocabularyMarker) { speakSentence(rest, lang) }
+            if let rest = splitter.flush(), !full.contains(Self.vocabularyMarker) { say(rest) }
+            if stayedSilent(full) { return }
+            for sentence in held { speakSentence(sentence, lang) }
             if learning { await learnVocabulary(from: full) }
             full = Self.withoutVocabulary(full)
             turns.append([["role": "user", "content": Persona.turnContext(language: lang) + "\n" + command],
@@ -1591,7 +1660,23 @@ final class Assistant: ObservableObject {
         }
     }
 
+    private func isSilentReply(_ text: String) -> Bool {
+        silenceAllowed && Self.visible(text).trimmingCharacters(in: CharacterSet.letters.inverted) == Self.silentReply
+    }
+
+    /// The model judged the phrase was not for JARVIS: nothing is said and listening does not reopen.
+    private func stayedSilent(_ text: String) -> Bool {
+        guard isSilentReply(text) else { return false }
+        Diagnostics.log("silenzio  parlava di Jarvis a qualcun altro: \"\(namedMidPhrase?.prefix(80) ?? "")\"")
+        note("Parlava di me, non a me: resto in silenzio")
+        reply = ""
+        generating = false
+        state = .idle
+        return true
+    }
+
     private func speakSentence(_ sentence: String, _ lang: Language) {
+        if isSilentReply(sentence) { return }
         stillWorkingReminder?.cancel()
         defer { skipRepeatedAcknowledgment = false }
         if skipRepeatedAcknowledgment, Acknowledgment.isBare(sentence) { return }
@@ -1868,10 +1953,17 @@ final class Assistant: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.tools.currentSource = "test"
-                self.heard = text
+                // With "Jarvis" in it, like a phrase heard while waiting: the same extraction as the voice.
+                var command = text
+                self.namedMidPhrase = nil
+                if let extracted = WakeVerifier.command(from: text), !extracted.isEmpty {
+                    command = extracted
+                    if WakeVerifier.isNamedMidPhrase(text) { self.namedMidPhrase = text }
+                }
+                self.heard = command
                 let lang = SpeechEngine.detectLanguage(text, hint: .italian)
                 self.language = lang
-                self.responseTask = Task { await self.respond(to: text, language: lang) }
+                self.responseTask = Task { await self.respond(to: command, language: lang) }
             }
         }
         note("Modalità test attiva (chiave in dev_token)")

@@ -206,6 +206,14 @@ enum WakeVerifier {
         return nil
     }
 
+    /// "Mi sa che Jarvis ti ha dato ragione": at least two words before "Jarvis" and some after.
+    /// It may be a request ("ora che ho finito Jarvis, mi trovo…") or a remark about JARVIS to someone else.
+    static func isNamedMidPhrase(_ text: String) -> Bool {
+        let words = text.split(whereSeparator: { $0 == " " })
+        guard let i = words.firstIndex(where: { isJarvis(normalize(String($0))) }) else { return false }
+        return i >= 2 && i < words.count - 1
+    }
+
     /// The small Whisper writes "Jarvis" said the Italian way in many forms:
     /// "giardis", "ciarvis", "charvis", "sciarvis", "djarvis", "jarbis"…
     /// The start is mapped back to "j" and then compared with "jarvis".

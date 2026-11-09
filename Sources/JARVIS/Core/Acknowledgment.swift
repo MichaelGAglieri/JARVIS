@@ -44,7 +44,7 @@ enum Acknowledgment {
     private static let actionVerbs: Set<String> = ["apri", "chiudi", "imposta", "metti", "avvia", "ferma", "lancia", "esegui", "manda", "invia", "scrivi",
                                                    "crea", "aggiungi", "prepara", "segna", "ricordami", "fissa", "programma", "sposta", "rinomina", "copia",
                                                    "compila", "carica", "attiva", "disattiva", "spegni", "accendi", "alza", "abbassa", "riproduci", "suona",
-                                                   "prenota", "collega", "connetti", "salva", "fai", "fammi", "minimizza", "riduci", "nascondi", "inizia", "riavvia", "cambia", "passa", "stampa",
+                                                   "prenota", "collega", "connetti", "abilita", "disabilita", "salva", "fai", "fammi", "minimizza", "riduci", "nascondi", "inizia", "riavvia", "cambia", "passa", "stampa",
                                                    "open", "close", "set", "put", "start", "run", "send", "write", "create", "add", "prepare", "schedule",
                                                    "remind", "move", "rename", "copy", "compile", "upload", "turn", "raise", "lower", "play", "connect", "save", "make", "print", "minimize", "minimise", "hide"]
     private static let polite: Set<String> = ["per", "favore", "please", "mi", "ti", "prego", "kindly"]
@@ -78,7 +78,8 @@ enum Acknowledgment {
 
     /// The model repeated the acknowledgment already said: "Certamente, signore." and nothing else.
     static func isBare(_ sentence: String) -> Bool {
-        let words = sentence.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+        // Numbers count: "15, signore." is a result, not the acknowledgment again.
+        let words = sentence.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
         return !words.isEmpty && words.count <= 5 && words.allSatisfy(bareWords.contains)
     }
 }

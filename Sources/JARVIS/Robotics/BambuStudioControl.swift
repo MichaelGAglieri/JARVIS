@@ -115,6 +115,7 @@ final class BambuStudioControl {
 
     private func checkPrinterIsFree() async throws {
         guard printer.isConfigured else { throw Problem("Stampante non configurata: mancano i dati nelle Impostazioni.") }
+        await printer.reachNow()
         printer.refresh()
         try await pause(1.2)
         guard printer.connected, printer.status.state != nil else { throw Problem("Non riesco a collegarmi alla stampante.") }

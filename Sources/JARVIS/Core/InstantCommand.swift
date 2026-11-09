@@ -157,11 +157,15 @@ enum InstantCommand: Equatable {
         guard isOpen || closeVerbs.contains(verb) else { return nil }
         let name = words.dropFirst()
         guard !name.contains(where: { otherThings.contains($0) || $0.contains(".") }) else { return nil }
-        let joined = withoutArticle(name.joined(separator: " "))
+        var joined = withoutArticle(name.joined(separator: " "))
+        // How Whisper writes "Claude": "Jarvis Apriclode" went to the model and took 7 seconds.
+        if claudeSpellings.contains(joined) { joined = "claude" }
         // "Avvia il robot" is a command for the robot: it does not open Robot Console.
         guard !joined.isEmpty, joined != "robot", joined != "app" else { return nil }
         return isOpen ? .open(joined) : .close(joined)
     }
+
+    private static let claudeSpellings: Set<String> = ["claud", "cloud", "clod", "clode", "cloude", "clowd", "klaud", "klode", "claudi"]
 
     private static func withoutArticle(_ name: String) -> String {
         var name = name

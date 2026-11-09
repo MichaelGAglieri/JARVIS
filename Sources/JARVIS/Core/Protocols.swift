@@ -17,6 +17,8 @@ struct JarvisProtocol {
     let after: [Step]
     /// Answer without the model; {esito} is the outcome of the first action.
     let reply: String?
+    /// "sintetico": a sequence of actions. JARVIS does not narrate the steps, it says only how it ended.
+    var brief = false
 
     func matching(_ text: String) -> String? {
         for phrase in phrases {
@@ -73,7 +75,7 @@ enum Protocols {
                 }
             }
             return JarvisProtocol(name: name, phrases: phrases.map { clean($0) }, before: steps("prima"), ask: item["chiedi"] as? String,
-                                  after: steps("dopo"), reply: item["risposta"] as? String)
+                                  after: steps("dopo"), reply: item["risposta"] as? String, brief: item["sintetico"] as? Bool ?? false)
         }
     }
 

@@ -3,6 +3,64 @@
 Every version was built, installed and tested on the Mac (and on the iPhone and iPad app when it was
 involved) before moving to the next one. All dates are in 2026.
 
+## 1.30.8 — 9 November
+
+- The HUD sphere becomes a neural network: the spiral is replaced by 16 neurons with dendrites, joined by soft
+  glowing axons. Each neuron fires in turn: its body flashes and a pulse runs along its axons, more often while
+  JARVIS listens, thinks or speaks.
+- The striped blocks are small data screens with live bars, waveforms or scrolling lines; they turn with the sphere
+  (none circles the outline any more).
+- Denser shell, brighter at the edges, so the sphere reads as a solid that turns. While waiting it turns about three
+  times faster, at 20 fps instead of 12; after a minute it slows down to 6 fps as before.
+
+## 1.30.7 — 9 November
+
+- One NUCLEUS on every display. A click opens the HUD around that NUCLEUS; if the HUD is open on another display,
+  it first shrinks into the NUCLEUS there. Each display remembers its own position, and a NUCLEUS can be dragged
+  only within its display: one pushed onto another display got stuck at the edge.
+- The NUCLEUS sits at the back of the normal level instead of level −1: there, on the main display, the full-screen
+  Übersicht window stayed in front of it and took its clicks. If an app window ends up underneath it, the NUCLEUS
+  goes back behind it, or hides while that window covers it completely (an app enlarged to fill the screen).
+
+## 1.30.6 — 9 November
+
+- New holographic sphere in the open HUD, inspired by JARVIS in *Age of Ultron*: drawn with Metal, a plexus of
+  nodes, glowing ribbons spiralling into a white core, striped data blocks and a broken rim. It reacts to listening,
+  thinking and the voice; every change of state eases in, so pulses never jump or reverse abruptly. The NUCLEUS on
+  the desktop keeps the original reactor.
+- Smoothness: each frame takes a fresh drawable from the Metal layer. A live test (`tests/reactor_sphere/live.sh`,
+  `GPU_LOAD=1` adds a load like speech synthesis) measures 30 fps in every active state and 12 while waiting.
+
+## 1.30.5 — 9 November
+
+- Running a Robot Console sequence by voice failed: the app exposes only what is on screen and JARVIS could not
+  scroll, so it pressed unrelated buttons and switched tabs. New `app_scroll` tool: scrolls the page, or the list that
+  contains an element, without keys or clicks. The model is told to scroll instead of searching elsewhere.
+- In protocols `{resto}` also works in the request to the model (`chiedi`), not only in tool arguments.
+
+## 1.30.4 — 9 November
+
+- Actions without commentary: during a Robot Console sequence JARVIS said 22 sentences in a minute, describing steps
+  already finished. Now, while it acts (apps, clicks, robot, printer, music), the sentences said between one step and
+  the next are dropped before speech synthesis: it gives the acknowledgment and at the end only "Done", the result,
+  the error or a question. Questions and conversation are answered as before.
+- Protocols with `"sintetico": true`: sequences of actions that acknowledge at once and speak only at the end.
+- A result with numbers ("15, sir.") is no longer mistaken for a repeated acknowledgment and left unsaid.
+
+## 1.30.3 — 9 November
+
+From the logs of the last day:
+- Printer switched off: the network search (254 addresses) ran every 4 minutes all night, even in privacy mode.
+  Now it comes back less and less often (4, 8, 16, then every 30 minutes), never in quiet hours or privacy mode,
+  and starts at once when you ask about the printer.
+- "Mi sa che Jarvis ti ha dato ragione" ("I think Jarvis proved you right"), said to another person, woke it up.
+  With "Jarvis" in the middle of the sentence the model reads the whole sentence and stays silent if it is not
+  addressed to it. Real requests are answered as before.
+- Morning briefing: Mail takes about 10 seconds. The briefing now waits for it at most 5 seconds; when it starts
+  by itself, the data is gathered while JARVIS answers the first request.
+- "Jarvis Apriclode" went to the model (7.7 seconds): instant commands recognise how Whisper writes "Claude"
+  (Clode, Cloud, Claud, Clod).
+
 ## 1.30.2 — 8 November
 
 - Repository in English: README, changelog, code comments and manual. The app itself still speaks Italian

@@ -42,6 +42,11 @@ final class BambuPrinter {
     /// The other network devices still to try.
     private var candidates: [String] = []
     private var failures = 0
+    /// The network search costs 254 attempts: after the first one it comes back more and more rarely
+    /// (4, 8, 16, then every 30 minutes) and never when `maySearch` says no (quiet hours, privacy).
+    private var searchInterval: TimeInterval = 240
+    private var nextSearch = Date.distantPast
+    var maySearch: (() -> Bool)?
     private var attempt: DispatchWorkItem?
     private var serial = ""
     private var code = ""
@@ -59,6 +64,7 @@ final class BambuPrinter {
         savedHost = host
         candidates = []
         failures = 0
+        resetSearch()
         status = Status()
         loginRefused = false
         disconnect()
@@ -121,18 +127,43 @@ final class BambuPrinter {
         }
         host = savedHost
         failures += 1
-        // At the first missed answer, and then now and then, look for it among the network's devices.
-        if !was, failures % 6 == 1 {
+        // At the first missed answer, and then more and more rarely, look for it among the network's devices.
+        if !was, Date() >= nextSearch, maySearch?() ?? true {
+            nextSearch = Date().addingTimeInterval(searchInterval)
+            searchInterval = min(searchInterval * 2, 1800)
             searchNetwork()
             return
         }
         retryLater()
     }
 
+    /// The saved address is tried again every 30 seconds at first, then every 5 minutes.
     private func retryLater() {
         let work = DispatchWorkItem { [weak self] in self?.connect() }
         retry = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (failures < 10 ? 30 : 300), execute: work)
+    }
+
+    private func resetSearch() {
+        searchInterval = 240
+        nextSearch = .distantPast
+    }
+
+    /// The user asks about the printer: if it is not connected, look for it at once (network search included)
+    /// and wait a few seconds for it, instead of waiting for the next scheduled attempt.
+    func reachNow() async {
+        guard isConfigured, !connected, !loginRefused else { return }
+        if candidates.isEmpty {
+            failures = 0
+            resetSearch()
+            disconnect()
+            host = savedHost
+            connect()
+        }
+        let end = Date().addingTimeInterval(5)
+        while Date() < end, !connected || status.state == nil, !loginRefused {
+            try? await Task.sleep(for: .milliseconds(300))
+        }
     }
 
     /// Devices of the same network the Mac has seen recently (ARP table). Only the printer's
@@ -270,6 +301,7 @@ final class BambuPrinter {
             connected = true
             attempt?.cancel()
             failures = 0
+            resetSearch()
             candidates = []
             if host != savedHost {
                 Diagnostics.log("stampante ritrovata a \(host) (era \(savedHost)): indirizzo aggiornato")

@@ -1,4 +1,6 @@
 import SwiftUI
+import MetalKit
+import simd
 
 enum HUD {
     static let cyan = Color(red: 0.31, green: 0.86, blue: 1.0)
@@ -84,36 +86,693 @@ extension Assistant.State {
     var isError: Bool { if case .error = self { return true } else { return false } }
 }
 
-/// The holographic reactor at the centre of the HUD, drawn on every frame.
+/// The public entry point is shared by the full HUD and the desktop NUCLEUS.
+/// TimelineView is the only clock: Metal never starts its own display link.
 struct ReactorView: View {
     @ObservedObject var assistant: Assistant
-    /// Small version (reactor mode): no degree scale, it would be unreadable.
     var compact = false
-    /// The animation stops when the window containing it is not visible.
+    var paused = false
+    @State private var animator = ReactorAnimator()
+    @State private var motion = SphereMotion()
+
+    var body: some View {
+        Group {
+            if compact {
+                // The NUCLEUS widget on the desktop stays the original reactor.
+                ClassicReactorView(assistant: assistant, paused: paused)
+            } else if let resources = SphereGPU.shared {
+                TimelineView(.animation(minimumInterval: frameInterval, paused: paused)) { timeline in
+                    SphereSurface(resources: resources, animator: animator, motion: motion, date: timeline.date,
+                                  state: assistant.state, deepIdle: assistant.deepIdle,
+                                  privacy: assistant.privacyMode, mic: assistant.levels.mic,
+                                  voice: assistant.levels.voice, compact: compact, paused: paused)
+                }
+            } else {
+                // A failed Metal setup must not make the NUCLEUS disappear.
+                // Static, cached geometry; no alternative animation loop or blur.
+                Canvas { context, size in
+                    let radius = min(size.width, size.height) * 0.46
+                    context.translateBy(x: size.width / 2, y: size.height / 2)
+                    context.scaleBy(x: radius, y: radius)
+                    let color = assistant.privacyMode ? HUD.privacy : assistant.state.isError ? HUD.amber : HUD.cyan
+                    context.stroke(SphereGeometry.fallback, with: .color(color.opacity(0.6)), lineWidth: 1 / radius)
+                }
+            }
+        }
+        .allowsHitTesting(false) // The existing HUD/NUCLEUS retains clicks, hover and drag.
+        .accessibilityHidden(true)
+    }
+
+    /// The sphere keeps moving while waiting: 20 fps (it costs about 1 ms of GPU per
+    /// frame), 6 after a minute of waiting, 30 while JARVIS works.
+    private var frameInterval: Double {
+        guard assistant.state == .idle else { return 1.0 / 30 }
+        return assistant.deepIdle ? 1.0 / 6 : 1.0 / 20
+    }
+}
+
+private struct SphereSurface: NSViewRepresentable {
+    let resources: SphereGPU
+    let animator: ReactorAnimator
+    let motion: SphereMotion
+    let date: Date
+    let state: Assistant.State
+    let deepIdle: Bool
+    let privacy: Bool
+    let mic: Float
+    let voice: Float
+    let compact: Bool
+    let paused: Bool
+
+    func makeNSView(context: Context) -> SphereMetalView {
+        SphereMetalView(resources: resources)
+    }
+
+    func updateNSView(_ view: SphereMetalView, context: Context) {
+        view.frozen = paused
+        guard !paused else { return }
+        animator.step(date, state: state, deepIdle: deepIdle, privacy: privacy, mic: mic, voice: voice)
+        // SwiftUI also calls this when the audio levels publish, with the same timeline
+        // date: nothing has moved, so no extra frame is drawn.
+        guard motion.step(date, state: state, deepIdle: deepIdle, animator: animator) else { return }
+        view.uniforms = SphereUniforms(animator: animator, state: state, compact: compact, motion: motion)
+        view.compact = compact
+        view.renderFrame()
+    }
+
+    static func dismantleNSView(_ view: SphereMetalView, coordinator: ()) {
+        view.frozen = true
+        view.releaseDrawables()
+    }
+}
+
+private final class SphereMetalView: MTKView {
+    let resources: SphereGPU
+    var uniforms = SphereUniforms()
+    var compact = false
+    var frozen = true
+    // Two frames may be in flight: with one only, a GPU busy with speech synthesis
+    // made every other frame drop and the motion stutter. A third is still dropped.
+    private let availableFrame = DispatchSemaphore(value: 2)
+
+    init(resources: SphereGPU) {
+        self.resources = resources
+        super.init(frame: .zero, device: resources.device)
+        colorPixelFormat = .bgra8Unorm
+        clearColor = MTLClearColorMake(0, 0, 0, 0)
+        framebufferOnly = true
+        sampleCount = 1
+        isPaused = true
+        enableSetNeedsDisplay = false
+        autoResizeDrawable = false
+        wantsLayer = true
+        layer?.isOpaque = false
+        (layer as? CAMetalLayer)?.maximumDrawableCount = 3
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var isOpaque: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        renderFrame()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        renderFrame()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        renderFrame()
+    }
+
+    func renderFrame() {
+        guard !frozen, let window, window.isVisible,
+              window.occlusionState.contains(.visible), !isHiddenOrHasHiddenAncestor,
+              bounds.width > 0, bounds.height > 0, let metal = layer as? CAMetalLayer else { return }
+        // Retina is capped at 2x. No full-screen offscreen textures or bloom passes.
+        let scale = min(window.backingScaleFactor, 2)
+        let size = CGSize(width: max(1, (bounds.width * scale).rounded()),
+                          height: max(1, (bounds.height * scale).rounded()))
+        if metal.drawableSize != size { metal.drawableSize = size }
+        guard availableFrame.wait(timeout: .now()) == .success else { return }
+        // A fresh drawable for every frame, taken from the layer. MTKView's
+        // currentDrawable is renewed only inside its own draw cycle, which this view
+        // does not use: reusing it showed a single frame and then updated only
+        // sporadically, which made the sphere stutter in every state.
+        guard let drawable = metal.nextDrawable(), let command = resources.queue.makeCommandBuffer() else {
+            availableFrame.signal()
+            return
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        var values = uniforms
+        values.viewport = SIMD4(Float(size.width), Float(size.height), Float(scale), 0)
+        resources.encode(command: command, pass: pass, uniforms: values, compact: compact)
+        let gate = availableFrame
+        command.addCompletedHandler { _ in gate.signal() }
+        #if SPHERE_HARNESS
+        drawable.addPresentedHandler { d in SphereHarness.presented(d.presentedTime) }
+        #endif
+        command.present(drawable)
+        command.commit()
+    }
+}
+
+/// Smoothed values for the sphere. Every quantity that depends on the state eases
+/// towards its new value, so passing from listening to thinking to speaking never
+/// makes pulses jump, reverse abruptly or the sphere snap in size.
+final class SphereMotion {
+    private var last: Date?
+    /// Position of the pulses along the paths, wrapped to 0...1.
+    private(set) var flow: Double = 0.5
+    /// +1 pulses run inwards (listening), -1 outwards; changes direction gradually.
+    private(set) var direction: Double = -1
+    /// 0 one pulse per path, 1 three (thinking, acting).
+    private(set) var density: Double = 0
+    /// Audio level, low-passed: the raw VU level jumps every frame with the voice.
+    private(set) var level: Double = 0
+    /// Extra scale from the voice.
+    private(set) var swell: Double = 0
+    /// Rotation of the sphere. While waiting it turns faster than the HUD's own
+    /// animator would (still slow after a minute, when the frame rate drops to 6 fps).
+    private(set) var spin: Double = 0
+    private var idleBoost: Double = 0
+    /// Clock of the neurons firing, wrapped at 400 (a multiple of every firing period).
+    private(set) var fire: Double = 0
+
+    /// Returns false when the date has not advanced: nothing new to draw.
+    func step(_ now: Date, state: Assistant.State, deepIdle: Bool = false, animator a: ReactorAnimator) -> Bool {
+        if let last, now <= last { return false }
+        let dt = min(0.1, last.map { now.timeIntervalSince($0) } ?? 0)
+        last = now
+        let ease = 1 - exp(-dt * 3)
+        idleBoost += ((state == .idle && !deepIdle ? 0.5 : 0) - idleBoost) * ease
+        spin += dt * (a.speed + idleBoost)
+        fire = (fire + dt * (0.45 + a.speed * 0.5 + idleBoost * 0.3)).truncatingRemainder(dividingBy: 400)
+        direction += ((state == .listening ? 1 : -1) - direction) * ease
+        density += ((state == .thinking || state == .acting ? 1 : 0) - density) * ease
+        level += (a.level - level) * (1 - exp(-dt * 12))
+        swell += (level * (state == .speaking ? 0.065 : 0.025) - swell) * (1 - exp(-dt * 10))
+        flow = (flow + dt * a.speed * 0.24 * direction).truncatingRemainder(dividingBy: 1)
+        if flow < 0 { flow += 1 }
+        return true
+    }
+}
+
+/// All fields are float4, with identical 16-byte alignment in Swift and Metal.
+/// Only this small value is uploaded per frame; geometry never changes.
+private struct SphereUniforms {
+    var motion = SIMD4<Float>(0, 0, 0.4, 0) // time, phase, energy, level
+    var state = SIMD4<Float>(1, 0, 0, 0) // boot, alert, privacy, flow phase
+    var rotation = SIMD4<Float>(1, 0, 1, 0) // cos/sin yaw, cos/sin tilt
+    var viewport = SIMD4<Float>(980, 980, 2, 0)
+    var primary = SIMD4<Float>(0, 0, 0, 1)
+    var ice = SIMD4<Float>(0, 0, 0, 1)
+    var deep = SIMD4<Float>(0, 0, 0, 1)
+    var dynamics = SIMD4<Float>(1, 1, 0, 0) // scale, speed, firing clock, pulse density
+
+    init() {}
+
+    init(animator a: ReactorAnimator, state assistantState: Assistant.State, compact: Bool, motion m: SphereMotion? = nil) {
+        let level = m?.level ?? a.level
+        let flow = m?.flow ?? (-a.phase * 0.24).truncatingRemainder(dividingBy: 1) + 1
+        let spin = m?.spin ?? a.phase
+        motion = SIMD4(Float(a.time), Float(spin), Float(a.energy), Float(level))
+        state = SIMD4(Float(a.boot), Float(a.alert), Float(a.privacy), Float(flow))
+        let yaw = Float(spin * 0.14)
+        let tilt = Float(0.24 + sin(spin * 0.09) * 0.18)
+        rotation = SIMD4(cos(yaw), sin(yaw), cos(tilt), sin(tilt))
+        let muted = Float(1 - a.privacy * 0.85)
+        let breath = Float(1 + 0.008 * sin(a.time * 1.35))
+        let swell = m?.swell ?? level * (assistantState == .speaking ? 0.065 : 0.025)
+        let fire = m?.fire ?? (a.time * 0.5).truncatingRemainder(dividingBy: 400)
+        dynamics = SIMD4(breath + Float(swell) * muted, Float(a.speed), Float(fire), Float(m?.density ?? 0))
+        let palette = SpherePalette.shared
+        primary = simd_mix(simd_mix(palette.cyan, palette.amber, SIMD4(repeating: Float(a.alert))),
+                           palette.privacy, SIMD4(repeating: Float(a.privacy)))
+        ice = simd_mix(palette.ice, primary, SIMD4(repeating: Float(max(a.alert, a.privacy))))
+        deep = simd_mix(palette.deep, primary * 0.45, SIMD4(repeating: Float(max(a.alert, a.privacy))))
+    }
+}
+
+private struct SpherePalette {
+    static let shared = SpherePalette()
+    let cyan = rgba(HUD.cyan), ice = rgba(HUD.ice), deep = rgba(HUD.deep)
+    let amber = rgba(HUD.amber), privacy = rgba(HUD.privacy)
+
+    private static func rgba(_ color: Color) -> SIMD4<Float> {
+        let c = NSColor(color).usingColorSpace(.deviceRGB) ?? .cyan
+        return SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), 1)
+    }
+}
+
+private struct SphereSegment {
+    var a: SIMD4<Float>
+    var b: SIMD4<Float>
+    var style: SIMD4<Float> // opacity, width in points, flow coordinate, seed
+}
+
+private struct SpherePoint {
+    var position: SIMD4<Float>
+    var style: SIMD4<Float> // radius in points, brightness, seed, kind (0 node / 1 process / 2 core)
+}
+
+/// Deterministic topology, built once for each level of detail, shared by all views.
+/// Group (the w of each position): 0 turns in 3D with the shell; 1 is the vortex,
+/// which spins about the view axis so its spiral always faces the viewer.
+private struct SphereGeometry {
+    var segments: [SphereSegment] = []
+    var points: [SpherePoint] = []
+    static let full = SphereGeometry(compact: false)
+    static let small = SphereGeometry(compact: true)
+    static let fallback: Path = {
+        var path = Path()
+        for s in small.segments {
+            path.move(to: CGPoint(x: CGFloat(s.a.x), y: CGFloat(s.a.y)))
+            path.addLine(to: CGPoint(x: CGFloat(s.b.x), y: CGFloat(s.b.y)))
+        }
+        return path
+    }()
+
+    init(compact: Bool) {
+        var random = SeededRandom(seed: 0x4A41_5256_4953)
+        var segs: [SphereSegment] = [], pts: [SpherePoint] = []
+        func r(_ a: Float, _ b: Float) -> Float { a + Float(random.next()) * (b - a) }
+        func unit() -> SIMD3<Float> {
+            let y = r(-1, 1), angle = r(0, 2 * .pi), s = sqrt(max(0, 1 - y * y))
+            return SIMD3(s * cos(angle), y, s * sin(angle))
+        }
+        func v4(_ p: SIMD3<Float>, _ group: Float) -> SIMD4<Float> { SIMD4(p.x, p.y, p.z, group) }
+        func line(_ a: SIMD3<Float>, _ b: SIMD3<Float>, group: Float, opacity: Float, width: Float, flow: Float, seed: Float) {
+            segs.append(SphereSegment(a: v4(a, group), b: v4(b, group), style: SIMD4(opacity, width, flow, seed)))
+        }
+        func dot(_ p: SIMD3<Float>, group: Float, radius: Float, brightness: Float, kind: Float, seed: Float? = nil) {
+            pts.append(SpherePoint(position: v4(p, group), style: SIMD4(radius, brightness, seed ?? r(0, 20), kind)))
+        }
+        /// A soft ribbon: several parallel strands plus two wide, faint passes for the glow.
+        /// `plane` set: the strands spread in that plane (vortex); nil: along the sphere surface.
+        func ribbon(steps: Int, strands: Int, group: Float, plane: SIMD3<Float>?, glow: Float, seed: Float,
+                    width: (Float) -> Float, path: (Float) -> SIMD3<Float>) {
+            for strand in 0..<strands {
+                let s = strands == 1 ? 0 : Float(strand) / Float(strands - 1) - 0.5
+                let wobble = r(0, 6.28)
+                let core = 1 - abs(s) * 2
+                var previous: SIMD3<Float>?
+                for step in 0...steps {
+                    let f = Float(step) / Float(steps)
+                    let c = path(f)
+                    let tangent = simd_normalize(path(min(1, f + 0.01)) - path(max(0, f - 0.01)) + SIMD3(0, 0, 1e-5))
+                    var side = simd_cross(tangent, plane ?? simd_normalize(c + SIMD3(1e-4, 1e-4, 0)))
+                    side = simd_length(side) < 1e-4 ? SIMD3(0, 0, 1) : simd_normalize(side)
+                    let lift = simd_cross(side, tangent)
+                    let p = c + side * (s * width(f) + 0.004 * sin(f * 23 + wobble))
+                        + lift * (0.012 * abs(s) * sin(f * 17 + wobble * 1.3))
+                    if let q = previous {
+                        line(q, p, group: group, opacity: 0.30 + 0.26 * core, width: 0.85 + 0.35 * core, flow: f, seed: seed)
+                    }
+                    previous = p
+                }
+            }
+            guard glow > 0 else { return }
+            for step in stride(from: 0, to: steps, by: 2) {
+                let a = path(Float(step) / Float(steps)), b = path(Float(min(steps, step + 2)) / Float(steps))
+                let f = Float(step) / Float(steps)
+                let swell = 0.4 + 0.6 * max(0, sin(.pi * f))
+                line(a, b, group: group, opacity: 0.085 * glow * swell, width: 22, flow: f, seed: seed)
+                line(a, b, group: group, opacity: 0.15 * glow * swell, width: 7, flow: f, seed: seed)
+            }
+        }
+
+        // 1. Plexus: nodes in the whole volume, denser on the shell, joined to nearby nodes.
+        // The shell holds most of them: seen at the edges, it gives the sphere its rotating outline.
+        let nodeCount = compact ? 160 : 1150
+        var nodes: [SIMD3<Float>] = []
+        for i in 0..<nodeCount {
+            let radius: Float = i % 9 == 0 ? r(0.08, 0.35) : i % 5 == 0 ? r(0.35, 0.8) : r(0.84, 0.97)
+            let p = unit() * radius
+            nodes.append(p)
+            dot(p, group: 0, radius: compact ? 1.8 : 2.7, brightness: r(0.8, 1.6), kind: 0)
+        }
+        // Spatial grid: each node is compared only with the 27 cells around it, not with every node.
+        let cell: Float = 0.25
+        func key(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+            SIMD3(Int32(floor(p.x / cell)), Int32(floor(p.y / cell)), Int32(floor(p.z / cell)))
+        }
+        var grid: [SIMD3<Int32>: [Int]] = [:]
+        for (i, p) in nodes.enumerated() { grid[key(p), default: []].append(i) }
+        for (i, p) in nodes.enumerated() {
+            let k = key(p)
+            var near: [(Float, Int)] = []
+            for dx: Int32 in -1...1 { for dy: Int32 in -1...1 { for dz: Int32 in -1...1 {
+                for j in grid[k &+ SIMD3(dx, dy, dz)] ?? [] where j != i { near.append((simd_distance(p, nodes[j]), j)) }
+            } } }
+            near.sort { $0.0 < $1.0 }
+            for (d, j) in near.prefix(compact ? 3 : 4) where j > i && d < cell {
+                line(p, nodes[j], group: 0, opacity: r(0.45, 0.72), width: 0.85, flow: r(0, 1), seed: r(0, 20))
+            }
+        }
+
+        // 2. Neural network (group 2): neurons inside the sphere, with dendrites, joined by
+        // soft glowing axons. Each neuron fires in turn: its body flashes and a pulse runs
+        // along its axons and dendrites. The seed of every piece is its neuron's firing phase.
+        let neuronCount = compact ? 5 : 16
+        var neurons: [(p: SIMD3<Float>, seed: Float)] = []
+        for _ in 0..<neuronCount {
+            let p = unit() * r(0.16, 0.74), seed = r(0, 1)
+            neurons.append((p, seed))
+            dot(p, group: 2, radius: compact ? 3.5 : 8, brightness: r(1.0, 1.3), kind: 3, seed: seed)
+            // Dendrites: short branching tendrils around the body.
+            for _ in 0..<(compact ? 2 : 5) {
+                var direction = unit(), q = p
+                for level in 0..<2 {
+                    let length = level == 0 ? r(0.10, 0.2) : r(0.05, 0.1), bend = unit() * 0.6
+                    var previous = q
+                    for step in 1...8 {
+                        let f = Float(step) / 8
+                        let next = q + simd_normalize(direction + bend * f) * length * f
+                        line(previous, next, group: 2, opacity: 0.5 * (1 - f * 0.5), width: level == 0 ? 0.9 : 0.7,
+                             flow: (Float(level) + f) * 0.12, seed: seed)
+                        previous = next
+                    }
+                    q = previous
+                    if level == 0 && !compact { dot(q, group: 2, radius: 2, brightness: 0.9, kind: 0) }
+                    direction = simd_normalize(direction + unit() * 0.9)
+                }
+            }
+        }
+        // Axons: each neuron to its two nearest and, sometimes, to a far one.
+        var joined = Set<Int>()
+        for (i, n) in neurons.enumerated() {
+            let near = neurons.indices.filter { $0 != i }.sorted {
+                simd_distance(n.p, neurons[$0].p) < simd_distance(n.p, neurons[$1].p)
+            }
+            var targets = Array(near.prefix(2))
+            if random.next() < 0.35, let far = near.last { targets.append(far) }
+            for j in targets where !joined.contains(min(i, j) * 100 + max(i, j)) {
+                joined.insert(min(i, j) * 100 + max(i, j))
+                let a = n.p, b = neurons[j].p
+                let control = (a + b) / 2 + unit() * simd_distance(a, b) * 0.35
+                let path: (Float) -> SIMD3<Float> = { f in
+                    var p = a * (1 - f) * (1 - f) + control * 2 * f * (1 - f) + b * f * f
+                    let l = simd_length(p)
+                    if l > 0.9 { p *= 0.9 / l }
+                    return p
+                }
+                ribbon(steps: compact ? 16 : 44, strands: compact ? 2 : 6, group: 2, plane: nil, glow: 1, seed: n.seed,
+                       width: { f in 0.006 + 0.032 * pow(max(0, sin(.pi * f)), 0.8) }, path: path)
+            }
+        }
+
+        // 3. Ribbons wrapping the shell: they give the sphere its outline.
+        for _ in 0..<(compact ? 4 : 13) {
+            let axis = unit()
+            let right = simd_normalize(simd_cross(axis, abs(axis.y) < 0.9 ? SIMD3(0, 1, 0) : SIMD3(1, 0, 0)))
+            let up = simd_cross(axis, right)
+            let start = r(0, 2 * .pi), span = r(2.2, 4.2), seed = r(0, 20), radius = r(0.84, 0.93), wave = r(0.25, 0.5)
+            ribbon(steps: compact ? 36 : 110, strands: compact ? 3 : 8, group: 0, plane: nil, glow: 0.8, seed: seed,
+                   width: { f in 0.012 + 0.06 * pow(max(0, sin(.pi * f)), 0.7) }) { f in
+                let t = start + span * f
+                return simd_normalize(right * cos(t) + up * sin(t) + axis * wave * sin(t * 2 + seed)) * radius
+            }
+        }
+
+        // 5. Broken rim: short dashes just outside the shell, always on the outline.
+        for _ in 0..<(compact ? 14 : 110) {
+            let angle = r(0, 2 * .pi), length = r(0.015, 0.07), radius = r(0.95, 1.05), seed = r(0, 20)
+            let thick = random.next() < 0.3
+            line(SIMD3(radius * cos(angle), radius * sin(angle), 0), SIMD3(radius * cos(angle + length), radius * sin(angle + length), 0),
+                 group: 1, opacity: thick ? 0.95 : 0.6, width: thick ? 3 : 1.2, flow: r(0, 1), seed: seed)
+        }
+
+        // 6. Small data screens (bars, waveforms, scrolling lines) on the shell and a few inside.
+        // They turn with the sphere; none circles around the outline.
+        for i in 0..<(compact ? 6 : 34) {
+            dot(unit() * (i % 3 == 0 ? r(0.3, 0.8) : r(0.85, 0.98)), group: 0, radius: r(4, 7), brightness: r(0.65, 1), kind: 1)
+        }
+
+        // 7. Core: a wide halo and a white-hot centre. Analytic sprites, no blur.
+        dot(.zero, group: 1, radius: compact ? 16 : 80, brightness: 1.3, kind: 2)
+        dot(.zero, group: 1, radius: compact ? 6 : 22, brightness: 1.5, kind: 2)
+        segments = segs
+        points = pts
+    }
+}
+
+private final class SphereGPU {
+    static let shared: SphereGPU? = {
+        do { return try SphereGPU() }
+        catch { NSLog("JARVIS sphere: Metal unavailable (%@); using static fallback", String(describing: error)); return nil }
+    }()
+    let device: MTLDevice
+    let queue: MTLCommandQueue
+    let lines: MTLRenderPipelineState
+    let dots: MTLRenderPipelineState
+    let full: Mesh
+    let small: Mesh
+
+    struct Mesh {
+        let segments: MTLBuffer
+        let points: MTLBuffer
+        let segmentCount: Int
+        let pointCount: Int
+        init(device: MTLDevice, geometry: SphereGeometry) throws {
+            guard let s = device.makeBuffer(bytes: geometry.segments,
+                    length: geometry.segments.count * MemoryLayout<SphereSegment>.stride, options: .storageModeShared),
+                  let p = device.makeBuffer(bytes: geometry.points,
+                    length: geometry.points.count * MemoryLayout<SpherePoint>.stride, options: .storageModeShared) else {
+                throw Failure.unavailable
+            }
+            segments = s; points = p
+            segmentCount = geometry.segments.count; pointCount = geometry.points.count
+            segments.label = "JARVIS fixed filaments"; points.label = "JARVIS fixed nodes"
+        }
+    }
+    enum Failure: Error { case unavailable }
+
+    init() throws {
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
+            throw Failure.unavailable
+        }
+        self.device = device; self.queue = queue
+        // Embedded MSL keeps SwiftPM packaging and the change confined to Reactor.swift.
+        let library = try device.makeLibrary(source: Self.shader, options: nil)
+        func pipeline(_ vertex: String, _ fragment: String) throws -> MTLRenderPipelineState {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = library.makeFunction(name: vertex)
+            d.fragmentFunction = library.makeFunction(name: fragment)
+            d.colorAttachments[0].pixelFormat = .bgra8Unorm
+            let c = d.colorAttachments[0]!
+            c.isBlendingEnabled = true
+            c.sourceRGBBlendFactor = .one; c.destinationRGBBlendFactor = .one
+            // Premultiplied alpha union: transparent windows composite without black rectangles.
+            c.sourceAlphaBlendFactor = .one; c.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            return try device.makeRenderPipelineState(descriptor: d)
+        }
+        lines = try pipeline("sphereLine", "filament")
+        dots = try pipeline("spherePoint", "spark")
+        full = try Mesh(device: device, geometry: .full)
+        small = try Mesh(device: device, geometry: .small)
+    }
+
+    func encode(command: MTLCommandBuffer, pass: MTLRenderPassDescriptor,
+                uniforms: SphereUniforms, compact: Bool) {
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.label = "JARVIS sphere: two draws, no bloom"
+        let mesh = compact ? small : full
+        var values = uniforms
+        encoder.setVertexBytes(&values, length: MemoryLayout<SphereUniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&values, length: MemoryLayout<SphereUniforms>.stride, index: 1)
+        encoder.setRenderPipelineState(lines)
+        encoder.setVertexBuffer(mesh.segments, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: mesh.segmentCount)
+        encoder.setRenderPipelineState(dots)
+        encoder.setVertexBuffer(mesh.points, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: mesh.pointCount)
+        encoder.endEncoding()
+    }
+
+    static let shader = #"""
+    #include <metal_stdlib>
+    using namespace metal;
+    struct Uniforms { float4 motion, state, rotation, viewport, primary, ice, deep, dynamics; };
+    struct Segment { float4 a, b, style; };
+    struct Point { float4 position, style; };
+    struct Out {
+        float4 position [[position]];
+        float2 uv;
+        float brightness;
+        float seed;
+        float kind;
+    };
+    constant float2 corners[6] = {float2(-1,-1),float2(1,-1),float2(-1,1),
+                                  float2(-1,1),float2(1,-1),float2(1,1)};
+    // motion: time, phase, energy, smoothed level. state: boot, alert, privacy, flow phase.
+    // dynamics: scale, speed, firing clock, pulse density (0 = one pulse, 1 = three per path).
+    // Groups (w of positions): 0 shell, 1 rim and core (turn about the view axis), 2 neurons.
+    float3 project(float4 q, constant Uniforms &u) {
+        float3 p = q.xyz;
+        float live = 1.0 - u.state.z * 0.85;
+        float ripple = sin(dot(p,float3(4,7,3)) - u.motion.y * 2.5);
+        p *= u.dynamics.x + ripple * u.motion.w * 0.018 * live;
+        if (q.w > 0.5 && q.w < 1.5) {
+            // Rim and core: turn about the view axis, so they always sit on the outline.
+            float s = -u.motion.y * 0.30, cs = cos(s), sn = sin(s);
+            p.xy = float2(p.x*cs - p.y*sn, p.x*sn + p.y*cs);
+            float t = 0.16 * sin(u.motion.y * 0.09), w = 0.18 * sin(u.motion.y * 0.07);
+            p.yz = float2(p.y*cos(t) - p.z*sin(t), p.y*sin(t) + p.z*cos(t));
+            p.xz = float2(p.x*cos(w) + p.z*sin(w), -p.x*sin(w) + p.z*cos(w));
+        } else {
+            p.xz = float2(p.x*u.rotation.x + p.z*u.rotation.y, -p.x*u.rotation.y + p.z*u.rotation.x);
+            p.yz = float2(p.y*u.rotation.z - p.z*u.rotation.w, p.y*u.rotation.w + p.z*u.rotation.z);
+        }
+        float reveal = smoothstep(0.0, 0.85, u.state.x);
+        float scale = 0.94 * (0.86 + 0.14 * reveal) / (1.12 - p.z*0.16);
+        float2 aspect = min(u.viewport.x,u.viewport.y) / u.viewport.xy;
+        return float3(p.xy * scale * aspect, p.z);
+    }
+    float pulseAt(float beat) { return pow(max(0.0, 1.0 - abs(beat - 0.5) * 2.0), 14.0); }
+    // Where a neuron is in its firing cycle: 0 = it fires now. Every neuron fires every
+    // 4 units of the firing clock, each with its own phase (the seed).
+    float cycleOf(float seed, constant Uniforms &u) { return fract(u.dynamics.z * 0.25 + seed); }
+    // A pulse running along an axon or dendrite (coordinate 0 at the neuron that fires).
+    float fire(float coordinate, float seed, constant Uniforms &u) {
+        float cycle = cycleOf(seed, u);
+        float d = (coordinate - cycle / 0.4) * 9.0;
+        float pulse = exp(-d * d) * (1.0 - smoothstep(0.38, 0.45, cycle));
+        float lit = 0.22 * (1.0 - smoothstep(0.3, 0.45, cycle)) * smoothstep(0.0, 0.03, cycle);
+        float active = (0.6 + u.motion.z * 0.5) * (1.0 - u.state.z * 0.8);
+        return 0.65 + (pulse * 3.2 + lit) * active;
+    }
+    // Edges of the shell are brighter: the sphere reads as a solid that turns.
+    float limb(float3 original, float z) {
+        float r = length(original);
+        float l = 1.0 - min(1.0, abs(z) / max(r, 0.2));
+        return mix(1.0, mix(0.8, 1.5, l * l), smoothstep(0.7, 0.85, r));
+    }
+    // Phase and density come smoothed from Swift: a change of state never makes pulses jump.
+    float flow(float coordinate, float seed, constant Uniforms &u) {
+        float shift = u.state.w + seed;
+        float pulse = mix(pulseAt(fract(coordinate + shift)), pulseAt(fract(coordinate * 3.0 + shift)), u.dynamics.w);
+        float active = (0.22 + u.motion.z * 0.65 + min(u.dynamics.y,2.1)*0.12) * (1.0-u.state.z*0.8);
+        return 0.60 + pulse * active * 2.3;
+    }
+    vertex Out sphereLine(uint id [[vertex_id]], uint instance [[instance_id]],
+                          const device Segment *segments [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+        Segment s = segments[instance];
+        float2 corner = corners[id];
+        float3 a = project(s.a,u), b = project(s.b,u);
+        float2 direction = (b.xy-a.xy)*u.viewport.xy;
+        float2 normal = float2(-direction.y,direction.x) / max(length(direction),0.001);
+        float3 p = mix(a,b,(corner.x+1.0)*0.5);
+        float width = s.style.y * u.viewport.z * (1.0+u.motion.w*0.3);
+        Out out;
+        out.position = float4(p.xy + normal * corner.y * max(width,0.75) / u.viewport.xy, 0, 1);
+        out.uv = float2(corner.x,corner.y);
+        float motion = s.a.w > 1.5 ? fire(s.style.z, s.style.w, u) : flow(s.style.z, s.style.w, u);
+        float edge = s.a.w < 0.5 ? limb(s.a.xyz, p.z) : 1.0;
+        out.brightness = s.style.x * (0.45+0.55*smoothstep(-0.95,0.9,p.z)) * edge
+                         * motion * smoothstep(0.04,0.85,u.state.x);
+        out.seed=s.style.w; out.kind=0;
+        return out;
+    }
+    fragment float4 filament(Out in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
+        float coverage = exp(-in.uv.y*in.uv.y*3.8);
+        float alpha = saturate(in.brightness * coverage * (0.75+u.motion.z*0.5));
+        float3 color = mix(mix(u.deep.rgb,u.primary.rgb,0.95),u.ice.rgb,min(in.brightness*0.35,0.6));
+        return float4(color*alpha,alpha);
+    }
+    vertex Out spherePoint(uint id [[vertex_id]], uint instance [[instance_id]],
+                           const device Point *points [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+        Point point=points[instance]; float2 corner=corners[id];
+        float3 p=project(point.position,u);
+        float core=step(1.5,point.style.w)*step(point.style.w,2.5);
+        float soma=step(2.5,point.style.w);
+        // A neuron flashes when it fires, and glows a little just before.
+        float cycle=cycleOf(point.style.z,u);
+        float flash=soma*(exp(-cycle*9.0)+0.35*exp(-(1.0-cycle)*30.0))*(1.0-u.state.z*0.8);
+        float radius=point.style.x*u.viewport.z*(1.0+u.motion.w*(core>0.5 ? 0.8 : 0.3))*(1.0+0.7*flash);
+        float2 extent=point.style.w==1.0 ? float2(2.0,1.25) : float2(1.0);
+        Out out;
+        out.position=float4(p.xy + corner*extent*radius*2.0/u.viewport.xy,0,1);
+        out.uv=corner; out.seed=point.style.z; out.kind=point.style.w;
+        float twinkle=0.72+0.28*sin(u.motion.y*2.0+point.style.z);
+        float edge=point.position.w<0.5 ? limb(point.position.xyz,p.z) : 1.0;
+        out.brightness=point.style.y*mix(0.4+0.6*smoothstep(-0.9,0.9,p.z),1.0,core)*edge
+                      *mix(twinkle,1.0,max(core,soma))*(1.0+2.2*flash)*smoothstep(0.0,0.7,u.state.x);
+        return out;
+    }
+    fragment float4 spark(Out in [[stage_in]], constant Uniforms &u [[buffer(1)]]) {
+        float r=length(in.uv);
+        float alpha; float3 color;
+        if(in.kind>2.5) {
+            // Neuron body: halo and bright centre, white while it fires.
+            alpha=(exp(-r*r*4.0)*0.45+exp(-r*r*28.0)*1.0)*in.brightness;
+            color=mix(mix(u.primary.rgb,u.ice.rgb,exp(-r*r*10.0)),float3(1.0),saturate(in.brightness-1.2)*exp(-r*r*30.0));
+            alpha=saturate(alpha)*(1.0-smoothstep(0.85,1.0,r));
+        } else if(in.kind>1.5) {
+            // Core: wide halo, bright body, white-hot centre.
+            float halo=exp(-r*r*5.0)*0.42 + exp(-r*r*22.0)*0.45;
+            float center=exp(-r*r*140.0)*1.2;
+            alpha=(halo+center)*(0.75+u.motion.z*0.25+u.motion.w*0.5)*in.brightness;
+            color=mix(mix(u.primary.rgb,u.ice.rgb,exp(-r*r*18.0)),float3(1.0),exp(-r*r*90.0));
+            alpha=saturate(alpha)*(1.0-smoothstep(0.85,1.0,r));
+        } else if(in.kind>0.5) {
+            // Small data screen: a frame and, inside, live bars, a waveform or scrolling lines.
+            float2 q=abs(in.uv);
+            float inside=(1.0-smoothstep(0.9,1.0,q.x))*(1.0-smoothstep(0.86,1.0,q.y));
+            float frame=smoothstep(0.76,0.9,max(q.x,q.y));
+            float2 t=in.uv*0.5+0.5;
+            float kind=fract(in.seed*7.31), now=u.motion.x, content;
+            if(kind<0.34) {
+                float bucket=floor(t.x*6.0);
+                float level=0.2+0.65*(0.5+0.5*sin(now*2.2+bucket*1.9+in.seed));
+                content=step(t.y,level)*step(0.22,fract(t.x*6.0))*step(0.12,t.y);
+            } else if(kind<0.67) {
+                float y=0.5+0.3*sin(t.x*9.0+now*3.0+in.seed)*(0.6+0.4*sin(t.x*3.0-now));
+                content=1.0-smoothstep(0.0,0.11,abs(t.y-y));
+            } else {
+                float rowsY=t.y*4.0+now*1.2;
+                float row=floor(rowsY);
+                float width=0.3+0.62*fract(sin(row*12.9898+in.seed*78.233)*43758.5453);
+                content=step(t.x,width)*step(0.12,t.x)*step(0.3,fract(rowsY))*step(fract(rowsY),0.72);
+            }
+            alpha=saturate(inside*(0.10+0.55*frame+0.75*content*(1.0-frame))*in.brightness);
+            color=mix(u.primary.rgb,u.ice.rgb,0.25+0.35*content);
+        } else {
+            alpha=(exp(-r*r*6.0)*0.45+exp(-r*r*45.0)*0.95)*in.brightness
+                   *(0.75+u.motion.z*0.3+u.motion.w*0.4);
+            color=mix(u.primary.rgb,u.ice.rgb,exp(-r*r*8.0));
+            alpha=saturate(alpha)*(1.0-smoothstep(0.85,1.0,r));
+        }
+        return float4(color*alpha,alpha);
+    }
+    """#
+}
+
+// MARK: - Classic reactor for the NUCLEUS desktop widget
+
+/// The NUCLEUS keeps the original reactor: only the open HUD shows the new sphere.
+private struct ClassicReactorView: View {
+    @ObservedObject var assistant: Assistant
     var paused = false
     @State private var animator = ReactorAnimator()
 
     var body: some View {
-        ZStack {
-            // The outer degree scale is fixed: it is drawn only once.
-            if !compact {
-                Canvas { context, size in
-                    var soft = context
-                    soft.blendMode = .plusLighter
-                    ReactorRenderer(context: context, size: size, a: ReactorAnimator()).drawOuterScale(soft, 1)
-                }
+        // 30 fps while active, 12 while waiting, 6 after a minute; stopped when hidden.
+        TimelineView(.animation(minimumInterval: frameInterval, paused: paused)) { timeline in
+            Canvas { context, size in
+                animator.step(timeline.date, state: assistant.state, deepIdle: assistant.deepIdle, privacy: assistant.privacyMode,
+                              mic: assistant.levels.mic, voice: assistant.levels.voice)
+                ClassicReactorRenderer(context: context, size: size, a: animator, compact: true).draw()
             }
-            // 30 frames per second while listening or speaking, 12 while waiting and 6 after
-            // a minute of waiting (rotations are very slow: to the eye little changes).
-            // With the window hidden or covered the animation stops completely.
-            TimelineView(.animation(minimumInterval: frameInterval, paused: paused)) { timeline in
-                Canvas { context, size in
-                    animator.step(timeline.date, state: assistant.state, deepIdle: assistant.deepIdle, privacy: assistant.privacyMode,
-                                  mic: assistant.levels.mic, voice: assistant.levels.voice)
-                    ReactorRenderer(context: context, size: size, a: animator, compact: compact).draw()
-                }
-                .drawingGroup()
-            }
+            .drawingGroup()
         }
     }
 
@@ -123,7 +782,7 @@ struct ReactorView: View {
     }
 }
 
-private struct ReactorRenderer {
+private struct ClassicReactorRenderer {
     let context: GraphicsContext
     let size: CGSize
     let a: ReactorAnimator
