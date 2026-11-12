@@ -77,9 +77,13 @@ claude auth login --claudeai
   (apps, clicks, robot, printer, music) it does not narrate the steps: at the end it says only "Done", the result,
   the error or the question it needs. Questions and conversation get a full answer.
 - A protocol with `"sintetico": true` in protocolli.json is a sequence of actions: it acknowledges at once and speaks only at the end.
-- Or press **⌃⌥Space** (Control + Option + Space) and speak. Press it again to interrupt.
+- Or press **⌃⌥Space** (Control + Option + Space) and speak. Press it again to interrupt. With AirPods, a press
+  on the stem does the same while JARVIS uses their microphone.
+- Long sentences are fine: a short command ends after 0.8 s of silence, a longer sentence waits up to 1.7 s, so you
+  can pause to think.
 - "Stop" or "cancel" ("basta", "annulla") stop it. It answers in the language you speak.
-- **Esc** or **×** hide the HUD; JARVIS keeps listening. The ◎ icon in the menu bar brings it back.
+- **Esc** hides the sphere; JARVIS keeps listening. A **double click** on the sphere shrinks it to the SATELLITE.
+  The ◎ icon in the menu bar brings it back.
 - JARVIS starts at login (can be turned off in ⚙︎ › System).
 
 ## What it can do
@@ -96,6 +100,7 @@ claude auth login --claudeai
 | Timers and Shortcuts | "25 minute study timer", "how long is left?", "run the Home shortcut" |
 | Memory | "remember that the chemistry exam is on 15 December", "what do you remember about me?" |
 | Study | "I'm starting to study Chemistry", "quiz me on Chemistry", "make flashcards on Fourier series" |
+| Breaks and reports | "let's take a break" (10-minute timer, then "shall we resume?"), at the end of a session JARVIS asks what to write in its report and reminds you of it next time |
 | Notes | "what do my notes say about capacitors?" → answers quoting document and page |
 | Briefing | "good morning Jarvis" → weather, appointments, reminders, mail, study and projects |
 | Vision | "explain this error", "what's wrong in this schematic?", "summarise this page", "look at the camera" |
@@ -126,7 +131,7 @@ The ROS 2 bridge (`Resources/ros_bridge.py`) starts on the first request inside 
 
 ## iPhone and iPad app
 
-A second app, in `iPhone/`, with the same reactor as the HUD. It is a remote: Whisper, Claude, Gemma and
+A second app, in `iPhone/`, with the same neural sphere as the HUD. It is a remote: Whisper, Claude, Gemma and
 the tools stay on the Mac; the phone carries your voice and shows the answers. You can say "Jarvis" with
 the app open, tap or hold the microphone, type, or use Siri ("Hey Siri, talk to JARVIS") and the Action button.
 
@@ -136,6 +141,7 @@ the app open, tap or hold the microphone, type, or use Siri ("Hey Siri, talk to 
   and Tailscale are refused.
 - **Face ID** at every opening, before connecting.
 - **Away from home** with Tailscale on both devices, also on 4G/5G.
+- **Fast voice**: JARVIS's voice reaches the phone in pieces of 0.3 s while it is being generated.
 - **Mac screen on the phone**: H.264 video at the Mac's resolution, up to 30 fps, Display P3 colour,
   hardware encoded; on a slow link the quality drops, not the smoothness.
 - **Manual control**: tap to click, double tap, long press for right click, drag with one finger (moves
@@ -152,13 +158,18 @@ reinstalled every 7 days (it warns two days before); pairing and settings are ke
 
 ## HUD and NUCLEUS
 
-- **HUD**: the animated sphere and its state on a borderless translucent background. Hovering shows the
-  buttons in a circle around the reactor: six panels (Phrases, Log, Activity, Modules, Protocol, Thought), NUCLEUS,
-  settings and ×.
-- **Thought**: the terminal icon opens a request activity log on the right. It shows the route, tools,
+- **HUD**: the neural sphere alone, in a borderless window that wraps it closely. No buttons and no state label
+  around it (only privacy mode and errors are written). Drag it to move it; double-click it to go back to the
+  SATELLITE.
+- **Panels**: Phrases, Log, Activity, Modules, Protocol and Thought open from the **Schede** menu, in the menu
+  bar on the left while JARVIS is in front and in the ◎ icon's menu. Each panel is its own window: drag it
+  anywhere, resize it; it remembers where it was and reopens at the next launch. They work with both the sphere
+  and the SATELLITE.
+- **Thought**: a request activity log. It shows the route, tools,
   queries, files consulted, domains found, outcomes and errors. It keeps up to 300 lines in memory and clears on “New conversation”.
-- **NUCLEUS** (◎): shrinks JARVIS to the reactor alone, in a round window on the desktop, above the wallpaper
-  and below every app window. There is one on every display, kept within its own display. It pulses while
+- **NUCLEUS** (◎): shrinks JARVIS to a small window. In the **SATELLITE** style (the default) it is a detailed 3D
+  satellite that floats above every window, on every desktop and over full-screen apps; the other styles stay
+  on the desktop, above the wallpaper and below every app window. There is one on every display, kept within its own display. It pulses while
   JARVIS listens or speaks; a click opens the HUD around it on that display (if the HUD is open on another
   display, it shrinks there first).
 - The animation runs at 30 fps while JARVIS works, 12 while waiting, 6 after a minute, and stops when hidden.
@@ -222,6 +233,7 @@ after a few days. ⌃⌥Space always works, and if the check fails JARVIS answer
 | Appointments | 10 minutes before each timed calendar event |
 | Reminders | at the due time |
 | Study | every 2 hours of an open study session, it suggests a break |
+| Break over | when a break started with "pausa" ends, it asks whether to resume the session |
 | Battery | at 20 % or less on battery, once |
 | Printer | when a Bambu print finishes, pauses or fails; if the printer does not answer, JARVIS looks for it on the network less and less often (up to every 30 minutes), never in quiet hours or privacy mode, and at once when you ask about it |
 | Briefing | at the first activation of the day between 5 and 12 |
@@ -246,12 +258,15 @@ quiet hours (23–8). Each one can be turned off in Settings › Initiative.
    files, git for projects, DuckDuckGo and wttr.in for web and weather, ScreenCaptureKit for the screen.
    Several tools can be chained in one request.
 7. **Voice**: the answer streams and is split into sentences; the first is spoken while the model is still
-   writing. A local Python service synthesises it: **Qwen3** on MLX in Italian, imitating
-   `Resources/voce_jarvis.wav` (a synthetic voice), **Kokoro** (Lewis) in English, with Supertonic and Apple
-   voices as fallbacks. You can interrupt it by voice.
-8. **HUD**: the open HUD shows a holographic sphere drawn with Metal: a plexus of nodes, glowing ribbons
-   (neurons that fire along glowing axons), a bright core, small live data screens and a broken rim. It reacts to state and voice level, and
-   every change of state eases in. The NUCLEUS keeps the reactor drawn with SwiftUI `Canvas`.
+   writing. A local Python service synthesises it: **Qwen3-TTS 0.6B** (8-bit) on MLX in Italian, imitating
+   `Resources/voce_jarvis.wav` (a synthetic voice) and sending each sentence in pieces while it is generated, so
+   the first words play after about a third of a second; **Kokoro** (Lewis) in English, with Supertonic and
+   Apple voices as fallbacks. You can interrupt it by voice, and that also stops the generation.
+8. **HUD**: the open HUD shows a neural sphere drawn with Metal, meant to look like brain tissue: 44 neurons
+   spread evenly through the sphere, each joined to its three nearest by straight and curved axons, with
+   branching dendrites; a large central neuron; a dense mesh of nodes on the shell and a few small data screens.
+   Neurons fire in turn and pulses run along the axons. The sphere turns and breathes slowly; while JARVIS
+   speaks its surface waves follow the voice. The SATELLITE is a SceneKit model built in code.
 
 ## Project structure
 

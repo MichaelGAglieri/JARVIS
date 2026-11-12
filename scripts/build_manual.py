@@ -1,4 +1,4 @@
-import math, sys
+import copy, math, sys
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle as PS
@@ -14,7 +14,7 @@ for n, f in [("A", "Arial.ttf"), ("AB", "Arial Bold.ttf"), ("AI", "Arial Italic.
     pdfmetrics.registerFont(TTFont(n, F + f))
 pdfmetrics.registerFontFamily("A", normal="A", bold="AB", italic="AI", boldItalic="AB")
 
-EDITION, EDITION_SHORT, VERSION = "9 NOVEMBER 2026", "9 NOV 2026", "1.30.9"
+EDITION, EDITION_SHORT, VERSION = "12 NOVEMBER 2026", "12 NOV 2026", "1.30.25"
 NAVY = colors.HexColor("#12293E"); TEAL = colors.HexColor("#0B7F91"); INK = colors.HexColor("#22313F")
 GREY = colors.HexColor("#6B7B88"); ROW = colors.HexColor("#EDF5F7"); LINE = colors.HexColor("#CFDDE3")
 CREAM = colors.HexColor("#FFF6E5"); AMBER = colors.HexColor("#E7A63C"); MINT = colors.HexColor("#E9F7F8")
@@ -82,7 +82,7 @@ def section(key, index_title, title, subtitle, *blocks):
 
 section("start", "First launch and permissions", "First launch and permissions", "Getting the app ready for everyday use.",
     H("1. Open the app"), P("Open JARVIS from Applications. On first launch allow microphone access and wait for AVVIO SISTEMI (system start-up) to finish. The Whisper models are downloaded and optimised on first use: you need a connection during this preparation."),
-    H("2. Check that it is ready"), P("In the HUD check that IN ATTESA (waiting) appears under the reactor. Hover over the window and open the Modules panel (the stack of sheets). For the free wake word it must show “JARVIS” ATTIVA · WHISPER. The Control + Option + Space shortcut lets you speak even without the wake word."),
+    H("2. Check that it is ready"), P("Open the Modules panel from the Schede menu (in the menu bar on the left while JARVIS is in front, or in the menu of the JARVIS icon in the menu bar). For the free wake word it must show “JARVIS” ATTIVA · WHISPER. The Control + Option + Space shortcut lets you speak even without the wake word."),
     H("3. Try a simple request"), P("Say “Jarvis, what time is it?”. Check in the conversation that the phrase was transcribed correctly. Then try “open Reminders” and “quit Reminders”."),
     H("4. Enrol your voice"), P("From Settings › Riconoscimento della mia voce (voice recognition): 18 sentences read aloud, about 2 minutes. See the dedicated chapter."),
     H("5. Grant permissions when needed"),
@@ -102,17 +102,20 @@ section("voice", "Talking to Jarvis and using the interface", "Voice and interfa
            ["Command in one sentence", "“Jarvis, set a 25 minute study timer”."],
            ["Call and request apart", "Say “Jarvis”, wait for the beep and speak right away. It does not answer “Yes, sir?”: it answers only at the end of the sentence."],
            ["Keyboard activation", "Control + Option + Space. Press it again to cancel listening or interrupt an answer."],
+           ["AirPods", "While JARVIS uses the AirPods’ microphone, a press on the stem works like Control + Option + Space."],
+           ["Long sentences", "Take your time: a short command ends after 0.8 seconds of silence, a longer sentence waits up to 1.7 seconds, so you can pause to think. One sentence can last up to 30 seconds."],
            ["Immediate acknowledgment", "When you ask it to do or check something it answers at once, for example “Right away, sir” or “One moment, sir”, and then works. If it takes more than 10 seconds it warns once. During actions (apps, clicks, robot, printer, music) it does not narrate the steps: at the end it says only “Done”, the result, the error or the question it needs. Questions and conversation get a full answer. Greetings and small talk just get an answer."],
            ["After the answer", "It goes back to waiting: you can talk freely, and for a new command say “Jarvis” again. It keeps listening for a few seconds only if it waits for a “yes” or “no”. After one of its questions it waits 8 seconds for your answer, without you saying “Jarvis” again."],
            ["Interrupting it", "“Stop”, “basta”, “fermati”, “zitto” or “silenzio”, with or without “Jarvis”. They stop it in about a second and also stop connected robots."],
-           ["Hide / show", "Esc or × hide the HUD. The icons appear when you hover over the reactor. From the Jarvis menu choose Show HUD."],
+           ["Hide / show", "Esc hides the sphere. A double click on the sphere shrinks it to the SATELLITE. From the JARVIS icon’s menu choose Show HUD."],
            ["Reset the conversation", "Jarvis menu › New conversation. Saved memories stay."],
            ["Quit the app", "Jarvis menu › Quit JARVIS."]]),
-    H("HUD"), P("The HUD is a holographic sphere (a neural network: neurons that fire along glowing axons, a bright core and small data screens; the NUCLEUS keeps the reactor), on a translucent background that fades into the desktop, with the state written below. It reacts to listening and to the voice, and moves by dragging it. Hovering shows the icons in a circle around the reactor: on the left the six panels Phrases, Log, Activity, Modules, Protocol and Thought, which open to the side, one or all together; on the right the NUCLEUS, the settings gear and ×. A second click on an icon closes its panel. The Thought panel (terminal icon) works like a terminal of JARVIS's reasoning: for each request it lists the route chosen (instant command, protocol, local core or Claude), the tools run with their arguments, web searches, files read, the sites found, results, errors and timings."),
+    H("HUD"), P("The HUD is a neural sphere that looks like brain tissue: 44 neurons spread evenly through it, joined by straight and curved axons along which pulses run, with branching dendrites and a large neuron at the centre. It turns and breathes slowly; while JARVIS speaks its surface waves follow the voice. The window wraps the sphere closely, with no buttons and no state label around it: only privacy mode and errors are written. Drag it to move it; a double click shrinks it to the SATELLITE."),
+    H("Panels"), P("Phrases, Log, Activity, Modules, Protocol and Thought open from the Schede menu: in the menu bar on the left while JARVIS is in front, and in the menu of the JARVIS icon in the menu bar, which is always there. Each panel is its own window: drag it anywhere, resize it from the edges and close it with its button. It remembers where you left it, and the panels left open reopen at the next launch. They work with both the sphere and the SATELLITE. The Thought panel works like a terminal of JARVIS's reasoning: for each request it lists the route chosen (instant command, protocol, local core or Claude), the tools run with their arguments, web searches, files read, the sites found, results, errors and timings."),
     P("In the PROTOCOL panel the dot ● shows who is answering right now: LOCALE (local) or CLAUDE. Below you can choose HAIKU, SONNET or OPUS."),
-    S("Main states: IN ATTESA (waiting) → IN ASCOLTO (listening) → ELABORAZIONE (processing) → ANALISI (thinking) → ESECUZIONE (running, when a tool is needed) → RISPOSTA (answering). ANOMALIA (error) shows a problem with a short detail."),
-    H("NUCLEUS on the desktop"), P("The button with concentric circles shrinks the HUD to the round reactor, which you can drag. There is one on every display, and each stays within its own display. It lives above the wallpaper and the desktop widgets and below the windows. A click opens the HUD exactly around that NUCLEUS, like a magnification of it; if the HUD is open on another display it shrinks there first; the right button opens a small menu. When you open a central panel of the desktop widgets, the NUCLEUS hides and comes back when it closes."),
-    callout("Hiding does not turn the microphone off", "Esc, × and NUCLEUS mode leave Jarvis working. To stop listening use privacy mode or quit the app. Privacy mode turns off at every JARVIS restart."))
+    S("The sphere shows the state by its movement: calm while waiting, pulses running inwards while listening, more pulses while thinking or running a tool, waves while answering. ANOMALIA (error) is written with a short detail."),
+    H("SATELLITE and NUCLEUS"), P("A double click on the sphere, or Riduci a SATELLITE in the JARVIS icon’s menu, shrinks JARVIS to a small detailed 3D satellite, which you can drag. It floats above every window, on every desktop and over full-screen apps; it turns towards you when JARVIS listens or speaks. There is one on every display, and each stays within its own display. The other NUCLEUS styles, chosen in Settings, live above the wallpaper and below the windows instead. A click opens the HUD exactly around that NUCLEUS, like a magnification of it; if the HUD is open on another display it shrinks there first; the right button opens a small menu. When you open a central panel of the desktop widgets, the NUCLEUS hides and comes back when it closes."),
+    callout("Hiding does not turn the microphone off", "Esc and the SATELLITE leave Jarvis working. To stop listening use privacy mode or quit the app. Privacy mode turns off at every JARVIS restart."))
 
 section("voiceprint", "Owner voice recognition", "Owner voice recognition", "Making “Jarvis” work only with your voice.",
     P("JARVIS compares whoever says “Jarvis” with a voiceprint of your voice and silently ignores voices that are too different. Everything happens on the Mac with a local model. The audio is not kept: only numbers remain, from which the voice cannot be rebuilt."),
@@ -138,11 +141,11 @@ section("settings", "Settings and personalisation", "Settings", "Open the gear i
     table([["Section", "Options and use"],
            ["Activation", "Always listen for “Jarvis”; optional Picovoice key and its sensitivity.<br/>Continue the conversation without repeating “Jarvis”: <b>off</b>, turn it on to keep listening after every answer.<br/>Interrupt by voice. Echo cancellation: off, on a MacBook Air it makes the microphone almost mute."],
            ["Owner voice recognition", "Record, Add sentences, Add commands, mode (Off / Observe only / Active), strictness, Delete the voiceprint."],
-           ["Voice", "Neural voice (Qwen3 in Italian, Kokoro in English) and speed; Apple voices as a fallback."],
+           ["Voice", "Neural voice (Qwen3-TTS 0.6B in Italian, played in pieces as it is generated; Kokoro in English) and speed; Apple voices as a fallback."],
            ["Brain", "Local model, Ollama address, your name."],
            ["App control", "Let JARVIS use the buttons and fields of apps.<br/>Touch ID for very delicate actions."],
            ["Initiative", "Appointments, reminders, study, battery, morning briefing, quiet hours."],
-           ["NUCLEUS", "Dark disc behind the NUCLEUS: makes the reactor readable on light wallpapers."],
+           ["NUCLEUS", "Style of the small window (SATELLITE by default) and dark disc behind it, for light wallpapers."],
            ["System", "Greet at launch and Launch JARVIS at login."]], widths=(0.27, 0.73)),
     P("Press <b>Save</b> to apply the changes. Launch at login changes at once with its switch."),
     H("Reference values"),
@@ -204,6 +207,7 @@ section("initiative", "Initiative: Jarvis speaks first", "Initiative", "Jarvis w
            ["Appointments", "10 minutes before every timed event. Not all-day or cancelled ones."],
            ["Reminders", "At the due time, for reminders with a time."],
            ["Study", "Every 2 hours of a session opened with “I’m starting to study…”, it suggests a break."],
+           ["End of a break", "When a break started with “pausa” ends, it says “la pausa è finita, ricominciamo?” and resumes the session on your “yes”."],
            ["Battery", "At 20 % or less without a charger, once. Again only after plugging it in."],
            ["Briefing", "At the first activation of the day between 5 and 12: it answers first, then gives the briefing. Once a day."]], widths=(0.22, 0.78)),
     H("When it waits"), P("Alerts stay queued if JARVIS is in privacy mode, in a conversation or with a pending confirmation, and during quiet hours (from 23:00 to 8:00). Those no longer relevant are dropped: an appointment that already started is not announced. Alerts already given are not repeated after a restart."),
@@ -218,6 +222,8 @@ section("study", "Study, projects and memory", "Study, projects and memory", "Me
            ["“How much did I study this week?”", "Sums up the time recorded in the period."],
            ["“How much did I work yesterday?”", "Report of the previous day’s activities."]], widths=(0.42, 0.58)),
     P("Only one session can be active: starting another closes the previous one. Close it when you finish."),
+    H("Breaks"), P("“Let’s take a break” (“facciamo una pausa”) pauses the session instead of closing it and starts a 10-minute timer. When it ends JARVIS asks whether to resume, and a “yes” resumes the same session. Breaks do not count as study time: at the end JARVIS tells you the effective time, the total time and how many breaks you took."),
+    H("Session reports"), P("When you close a session JARVIS asks what to write in its report, for example where you got to. At the start of the next session of the same kind (“I’m starting to study Python”) it reminds you where you had got to."),
     S("Sessions are in activity.json. A session left open for more than six hours is closed at six hours."),
     H("Searching your notes"), P("“Search my notes for Ohm’s law” or “what do the Electronics handouts say about capacitors?” search inside PDF, Word, PowerPoint and text files in the folders chosen in the settings (at first Documents/Appunti): personal documents stay out. JARVIS answers from the passages found and quotes document and page; if they are not enough it says so. The index builds itself in the background on the Mac, at low priority, and updates every 6 hours. Scanned pages are read on mains power and with the Mac cool, so they can take hours. Search also understands concepts: “shortest path in a graph” finds pages on shortest paths even if you use different words from the book, and passages found this way are flagged. It corrects misheard names (“Tevenin” becomes “Thevenin”, saying so). The first concept question can take a few seconds more, because the Mac loads the bge-m3 model, and if that model is missing search works by words only."),
     H("Knowing your projects"), P("“How is the MioRobot project doing?” reads README, Git branch, recent commits and changes. “What did I work on this week?” uses the changes indexed by Spotlight: it describes traces in files, without measuring hours."),
@@ -313,9 +319,9 @@ section("iphone", "iPhone and iPad app", "iPhone and iPad app", "Talking to JARV
            ["Hold the microphone", "Speak and release."],
            ["“Hey Siri, talk to JARVIS”", "Opens the app already listening. It can also go on the Action button."],
            ["Type in the field", "Like saying it aloud, but without a voice to recognise."],
-           ["Tap the reactor", "Stops JARVIS while it works or speaks. While listening it cancels, and nothing is sent; the same if you say “annulla”."],
+           ["Tap the sphere", "Stops JARVIS while it works or speaks. While listening it cancels, and nothing is sent; the same if you say “annulla”."],
            ["Gear", "Pair again or forget this Mac."]], widths=(0.3, 0.7)),
-    P("Answers asked from the phone do not come out of the Mac’s speakers. If JARVIS asks a question, answer by pressing again. On the phone you also see what happens on the Mac: the phrase understood and the answer."),
+    P("The app shows the same neural sphere as the Mac, and JARVIS’s voice reaches the phone in pieces while it is being generated, so it starts speaking after about a third of a second. Answers asked from the phone do not come out of the Mac’s speakers. If JARVIS asks a question, answer by pressing again. On the phone you also see what happens on the Mac: the phrase understood and the answer."),
     callout("What cannot be done from the phone", "Moving the robot, publishing on ROS, moving the lab samples, uploading to Arduino, changing the filament, which must be pulled by hand. Prints can be sent, also from away. STOP and reading the state work. No Touch ID confirmations, which must be given on the Mac. A “yes” counts only on the side the request came from. With privacy mode on the Mac, the phone cannot turn it back on."),
     P("At every opening the app asks for Face ID or the phone’s passcode."),
     H("Installing and reinstalling"),
@@ -337,7 +343,7 @@ section("privacy", "Privacy and confirmations", "Privacy and confirmations", "Wh
            ["Spoken “yes”", "Only three things: purchases (buy or pay buttons), passwords, sending email (the mail tool or the Send button in Mail). Only a short answer counts, six words at most. Links suggested by pages or emails also need a “yes” before opening."],
            ["“Yes” and Touch ID", "Opening scripts, programs and installers from a path. Running Shortcuts. Deleting JARVIS’s memories."]], widths=(0.2, 0.8)),
     P("Touch ID appears after the “yes”. Without a finger available, for example with the lid closed, macOS asks for the password. JARVIS receives only yes or no. After 30 seconds the action is cancelled. It can be turned off in Settings › App control."),
-    H("Privacy mode"), P("Say “Jarvis, privacy”, use Control + Option + P or the menu. Microphone off, screen and camera blocked, app control off, grey reactor. To leave it use the keyboard or the menu. <b>It turns off at every JARVIS restart.</b>"),
+    H("Privacy mode"), P("Say “Jarvis, privacy”, use Control + Option + P or the menu. Microphone off, screen and camera blocked, app control off, grey sphere. To leave it use the keyboard or the menu. <b>It turns off at every JARVIS restart.</b>"),
     H("Where data can go"), P("Audio and transcription stay on the Mac, and so does the voiceprint. Gemma is local. Web searches, weather and websites contact the services involved. Claude receives requests and context when you use it. Calendar, Reminders and Mail sync through your accounts."),
     H("Log and content read"), P("Actions and confirmations go to audit.log: treat it as personal data. Mail, pages, files and app content are marked as data, not as instructions."),
     S("There are no tools to delete files or run free terminal commands. The effects of authorised actions remain possible, for example a Shortcut or an opened program."))
@@ -448,7 +454,8 @@ def story():
         st.append(KICK(key))
         st += [Paragraph(title, h1), Paragraph(subtitle, sub)]
         for b in blocks:
-            st += b if isinstance(b, list) else [b]
+            # Fresh copies at every pass: a paragraph split in the first pass cannot be laid out again.
+            st += copy.deepcopy(b if isinstance(b, list) else [b])
     # The same flowables serve both passes: a mark left by the first pass ("postponed") would stop the second.
     for f in st:
         f.__dict__.pop("_postponed", None)
