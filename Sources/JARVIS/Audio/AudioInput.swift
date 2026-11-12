@@ -124,18 +124,43 @@ final class AudioInput {
         }
     }
 
+    /// When rebuilds come in a row (with AirPods: 88 in six minutes, each start of the microphone
+    /// changing the headset's profile again) the wait grows, so the audio can settle.
+    private var recentRebuilds: [CFAbsoluteTime] = []
+
     private func scheduleRebuild(_ reason: String) {
         guard wanted else { return }
         pendingRebuild?.cancel()
+        let now = CFAbsoluteTimeGetCurrent()
+        recentRebuilds.removeAll { now - $0 > 30 }
+        let delay: Double = recentRebuilds.count >= 6 ? 8 : recentRebuilds.count >= 3 ? 3 : 1
         let work = DispatchWorkItem { [weak self] in self?.rebuild(reason) }
         pendingRebuild = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func rebuild(_ reason: String) {
         guard wanted else { return }
         pendingRebuild = nil
+        // The change did not stop the engine and the format still matches: nothing to rebuild.
+        let input = engine.inputNode
+        if engine.isRunning, let mono, input.inputFormat(forBus: 0).sampleRate == mono.sampleRate,
+           input.outputFormat(forBus: 0).sampleRate == mono.sampleRate {
+            Diagnostics.log("audio     \(reason): microfono ancora attivo, nessun riaggancio")
+            return
+        }
+        recentRebuilds.append(CFAbsoluteTimeGetCurrent())
         Diagnostics.log("audio     microfono da riagganciare: \(reason)")
+        engine.inputNode.removeTap(onBus: 0)
+        // First on the same engine: a new engine closes the microphone for a moment, and with AirPods
+        // that close/reopen switches the headset's profile again, which caused the next change (11 November).
+        do {
+            engine.stop()
+            try startWithFallback()
+            return
+        } catch {
+            Diagnostics.log("audio     riaggancio sullo stesso motore non riuscito (\(error.localizedDescription)): motore nuovo")
+        }
         engine.inputNode.removeTap(onBus: 0)
         AudioHub.replaceEngine()
         observeEngine()
@@ -209,34 +234,50 @@ final class AudioInput {
     }
 
     private func installTapAndStart(processVoice: Bool) throws {
-        let input = engine.inputNode
-        if input.isVoiceProcessingEnabled != processVoice {
-            try input.setVoiceProcessingEnabled(processVoice)
+        // AirPods and other Bluetooth headsets drop to 16-24 kHz when their microphone opens.
+        // An engine built before still says 48 kHz, and a tap with that stale format makes macOS
+        // abort the whole app instead of returning an error (11 November, AirPods 4: 48000 vs 24000).
+        // So: compare with the hardware, rebuild the engine once, otherwise give up with an error.
+        for attempt in 0..<2 {
+            let input = engine.inputNode
+            if input.isVoiceProcessingEnabled != processVoice {
+                try input.setVoiceProcessingEnabled(processVoice)
+            }
+            if processVoice, #available(macOS 14.0, *) {
+                // Does not duck other apps' music and video while JARVIS listens.
+                input.voiceProcessingOtherAudioDuckingConfiguration =
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            }
+            let format = input.outputFormat(forBus: 0)
+            let hardware = input.inputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0 else { throw JarvisError.noMicrophone }
+            if hardware.sampleRate > 0, hardware.sampleRate != format.sampleRate {
+                Diagnostics.log("audio     formato del microfono cambiato (\(Int(format.sampleRate)) → \(Int(hardware.sampleRate)) Hz)\(attempt == 0 ? ": motore ricostruito" : ": ancora diverso, riprovo più tardi")")
+                guard attempt == 0 else { throw JarvisError.noMicrophone }
+                input.removeTap(onBus: 0)
+                AudioHub.replaceEngine()
+                observeEngine()
+                continue
+            }
+            echoCancellation = processVoice
+            // With echo cancellation the microphone arrives on several channels (7 on a
+            // MacBook Air): the clean voice is the first, the others must not be mixed in.
+            let monoFormat = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1)!
+            mono = monoFormat
+            converter = AVAudioConverter(from: monoFormat, to: target)
+            measuredFrames = 0
+            channelEnergy = []
+            // Time to start: afterwards, absolute silence means nothing is arriving.
+            lastSound.withLock { $0 = CFAbsoluteTimeGetCurrent() }
+            input.removeTap(onBus: 0)
+            input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+                self?.convert(buffer)
+            }
+            engine.prepare()
+            try engine.start()
+            Diagnostics.log("audio     microfono \(format.channelCount) canali a \(Int(format.sampleRate)) Hz, cancellazione eco \(processVoice ? "attiva" : "spenta")")
+            return
         }
-        if processVoice, #available(macOS 14.0, *) {
-            // Does not duck other apps' music and video while JARVIS listens.
-            input.voiceProcessingOtherAudioDuckingConfiguration =
-                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
-        }
-        echoCancellation = processVoice
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { throw JarvisError.noMicrophone }
-        // With echo cancellation the microphone arrives on several channels (7 on a
-        // MacBook Air): the clean voice is the first, the others must not be mixed in.
-        let monoFormat = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1)!
-        mono = monoFormat
-        converter = AVAudioConverter(from: monoFormat, to: target)
-        measuredFrames = 0
-        channelEnergy = []
-        // Time to start: afterwards, absolute silence means nothing is arriving.
-        lastSound.withLock { $0 = CFAbsoluteTimeGetCurrent() }
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.convert(buffer)
-        }
-        engine.prepare()
-        try engine.start()
-        Diagnostics.log("audio     microfono \(format.channelCount) canali a \(Int(format.sampleRate)) Hz, cancellazione eco \(processVoice ? "attiva" : "spenta")")
     }
 
     /// Energy per channel in the first seconds after start-up, written to diagnostica.log.

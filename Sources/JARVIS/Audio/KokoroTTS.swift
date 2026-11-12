@@ -21,7 +21,9 @@ final class KokoroTTS {
 
     /// The Qwen3 Italian voice is optional: without it, Italian goes to Supertonic.
     static var hasQwen: Bool {
-        FileManager.default.fileExists(atPath: directory.appendingPathComponent("qwen3/config.json").path)
+        ["qwen3-0.6b", "qwen3"].contains {
+            FileManager.default.fileExists(atPath: directory.appendingPathComponent("\($0)/config.json").path)
+        }
     }
 
     /// The Supertonic Italian voice is optional: without it, Italian stays with Kokoro.
@@ -106,6 +108,57 @@ final class KokoroTTS {
         let frames = data.count / MemoryLayout<Float>.size
         let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 1)!
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
+            throw KokoroError.failed("buffer")
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        data.withUnsafeBytes { raw in
+            buffer.floatChannelData![0].update(from: raw.bindMemory(to: Float.self).baseAddress!, count: frames)
+        }
+        return buffer
+    }
+}
+
+extension KokoroTTS {
+    /// A Qwen3 sentence in pieces of about 0.3 s, handed over as soon as they arrive: the first
+    /// words play while the rest is still being generated. Cancelling the task stops the generation too.
+    func synthesizeStream(_ text: String, speed: Double) -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    guard let port, let url = URL(string: "http://127.0.0.1:\(port)/synth") else { throw KokoroError.notRunning }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.timeoutInterval = 90
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    request.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "text": text, "voice": "qwen3", "lang": "it", "speed": speed, "stream": true])
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw KokoroError.failed("stream") }
+                    let piece = Int(Self.sampleRate * 0.3) * MemoryLayout<Float>.size
+                    var pending = Data()
+                    pending.reserveCapacity(piece)
+                    for try await byte in bytes {
+                        pending.append(byte)
+                        if pending.count >= piece {
+                            continuation.yield(try Self.buffer(from: pending))
+                            pending.removeAll(keepingCapacity: true)
+                        }
+                    }
+                    let whole = pending.count - pending.count % MemoryLayout<Float>.size
+                    if whole > 0 { continuation.yield(try Self.buffer(from: pending.prefix(whole))) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    static func buffer(from data: Data) throws -> AVAudioPCMBuffer {
+        let frames = data.count / MemoryLayout<Float>.size
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(frames, 1))) else {
             throw KokoroError.failed("buffer")
         }
         buffer.frameLength = AVAudioFrameCount(frames)

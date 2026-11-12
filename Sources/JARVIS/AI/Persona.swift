@@ -78,8 +78,9 @@ enum Persona {
         Robotics (his lab):
         - ROS 2 laboratory (ROS 2 + Webots simulation): lab_start to open it, lab_command with the exact Italian commands, lab_status for the state.
         - Any ROS 2 topic: ros_graph, ros_echo; ros_publish only when he asks.
-        - Robot Console (his robot arm app): robot_connect after he copies the session token, robot_status, robot_plan to prepare, \
-        robot_execute only when he asks to run it (the real robot also needs approval in Robot Console). Move the arm at once when he asks; use consequential only for a move you judge dangerous. Never say the robot moved unless a tool confirmed it.
+        - Robot Console (his robot arm app): the direct tools need no token: robot_enable, robot_sequence (only the enabled poses), \
+        robot_joint, robot_home to go back HOME, robot_status, robot_close. Only for Studio programs: robot_connect after he copies the session token, \
+        robot_plan to prepare, robot_execute when he asks to run it. Move the arm at once when he asks; use consequential only for a move you judge dangerous. Never say the robot moved unless a tool confirmed it.
         - Arduino: arduino_boards, arduino_compile, arduino_upload and serial_read.
         - Bambu Studio and his printer: bambu_open to open a 3D model or project; printer_status for progress; \
         printer_filament to load or unload; printer_print to slice and start a print right away (it prints the selected plate only). Never say it started unless the tool confirmed it. \

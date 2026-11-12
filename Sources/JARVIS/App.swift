@@ -25,7 +25,7 @@ struct JarvisApp: App {
     var body: some Scene {
         MenuBarExtra {
             Button("Mostra HUD") { delegate.showHUD() }
-            Button("Riduci a NUCLEO") { delegate.showCompact() }
+            Button("Riduci a SATELLITE") { delegate.showCompact() }
             Button("Parla (⌃⌥Spazio)") { delegate.assistant.pushToTalk() }
             Button("Nuova conversazione") { delegate.assistant.resetConversation() }
             Button(delegate.assistant.privacyMode ? "Esci dalla modalità privacy (⌃⌥P)" : "Modalità privacy (⌃⌥P)") {
@@ -35,11 +35,17 @@ struct JarvisApp: App {
                 delegate.assistant.setBrain(delegate.assistant.brain == .claude ? .local : .claude)
             }
             Divider()
+            Section("Schede") { PanelMenuItems(panels: delegate.panels) }
+            Divider()
             SettingsLink { Text("Impostazioni…") }
             Divider()
             Button("Esci da JARVIS") { NSApp.terminate(nil) }
         } label: {
             Image(systemName: "circle.circle")
+        }
+        // The same rows in the menu bar on the left, while JARVIS is the frontmost app.
+        .commands {
+            CommandMenu("Schede") { PanelMenuItems(panels: delegate.panels) }
         }
 
         Settings {
@@ -51,6 +57,8 @@ struct JarvisApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let assistant = Assistant()
+    /// The panels (Frasi, Registro, …) as movable windows, opened from the menu bar.
+    lazy var panels = PanelWindows(assistant: assistant)
     private var window: HUDWindow?
     /// One NUCLEUS for every connected display.
     private var reactors: [CGDirectDisplayID: ReactorPanel] = [:]
@@ -66,10 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let hud = HUDView(assistant: assistant, activity: assistant.activity,
-                          onClose: { [weak self] in self?.window?.orderOut(nil) },
+        let hud = HUDView(assistant: assistant,
                           onCompact: { [weak self] in self?.showCompact() },
-                          onDrawerChange: { [weak self] left, right in self?.window?.setDrawers(left: left, right: right) },
                           onWindowDrag: { [weak self] ended in self?.window?.followMouse(ended: ended) })
         let window = HUDWindow(content: hud)
         self.window = window
@@ -100,6 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate()
         }
         updateCompactVisible()
+        panels.anchor = { [weak self] in self?.jarvisFrame() }
+        panels.restore()
         assistant.boot()
         enableLaunchAtLoginOnce()
         awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
@@ -113,6 +121,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.window?.orderFrontRegardless()
             }
         }
+    }
+
+    /// Where JARVIS is on screen now: the HUD if open, otherwise the SATELLITE of the main display.
+    private func jarvisFrame() -> NSRect? {
+        if let window, window.isVisible { return window.frame }
+        return nucleus(on: NSScreen.main)?.frame
     }
 
     /// On the first run from /Applications JARVIS adds itself to the login
@@ -368,36 +382,11 @@ final class HUDWindow: NSWindow {
 
     /// The window follows the mouse: only how far it moved since the drag started counts.
     func followMouse(ended: Bool) {
-        guard !ended else { dragStart = nil; homeReactorX = nil; return }
+        guard !ended else { dragStart = nil; return }
         let mouse = NSEvent.mouseLocation
         let start = dragStart ?? (mouse, frame.origin)
         dragStart = start
         setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x, y: start.origin.y + mouse.y - start.mouse.y))
-    }
-
-    /// How much space the panels to the left of the reactor take now.
-    private var leftWidth: CGFloat = 0
-    /// Where the reactor was before opening the panels, if it was moved to fit them on screen.
-    private var homeReactorX: CGFloat?
-
-    /// Widens the window on the sides with an open panel: the reactor does not move,
-    /// unless the panels would go off screen. With all closed, it goes back to its place.
-    func setDrawers(left: Bool, right: Bool) {
-        let newLeft = left ? HUDView.drawerWidth : 0
-        let width = HUDView.size.width + newLeft + (right ? HUDView.drawerWidth : 0)
-        var reactorX = frame.minX + leftWidth + HUDView.size.width / 2
-        if left || right {
-            if homeReactorX == nil { homeReactorX = reactorX }
-        } else if let home = homeReactorX {
-            reactorX = home
-            homeReactorX = nil
-        }
-        var target = NSRect(x: reactorX - HUDView.size.width / 2 - newLeft, y: frame.minY, width: width, height: frame.height)
-        if let area = screen?.visibleFrame {
-            target.origin.x = max(area.minX, min(target.minX, area.maxX - target.width))
-        }
-        leftWidth = newLeft
-        setFrame(target, display: true, animate: false)
     }
 
     override func cancelOperation(_ sender: Any?) { orderOut(nil) }

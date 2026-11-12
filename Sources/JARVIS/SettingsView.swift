@@ -86,8 +86,12 @@ struct SettingsView: View {
                 Text("In privacy, durante una conversazione o con una conferma in sospeso gli avvisi aspettano.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("NUCLEO") {
-                Toggle("Disco scuro dietro al NUCLEO", isOn: $draft.nucleusBackdrop)
+            Section("SATELLITE") {
+                Picker("Aspetto del SATELLITE", selection: $draft.nucleusStyle) {
+                    Text("Reattore").tag("reattore")
+                    Text("Satellite").tag("satellite")
+                }
+                Toggle("Disco scuro dietro al SATELLITE", isOn: $draft.nucleusBackdrop)
                 Text("Spento si fonde con lo sfondo; acceso resta leggibile su sfondi chiari o sopra le finestre.")
                     .font(.caption).foregroundStyle(.secondary)
             }

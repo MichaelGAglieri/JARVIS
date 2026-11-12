@@ -44,6 +44,8 @@ final class VoicePipeline {
     /// While JARVIS speaks: phrases cut every 2 s (with 0.8 s of overlap),
     /// so "Jarvis, basta" arrives at once even if its voice never pauses.
     var bargeIn = false
+    /// The robot arm is moving: every phrase is cut quickly and checked for "stop".
+    var fastStop = false
     var onNothingHeard: (() -> Void)?
     var onLevel: ((Float) -> Void)?
 
@@ -159,7 +161,7 @@ final class VoicePipeline {
         if porcupine?.feed(frame) == true {
             DispatchQueue.main.async { self.onWake?() }
         }
-        if porcupine == nil && listensForSpeech { cutSegments(frame, db: db) }
+        if (porcupine == nil && listensForSpeech) || fastStop { cutSegments(frame, db: db) }
     }
 
     /// Cuts the phrases: starts after 0.12 s of voice, ends after 0.6 s of
@@ -183,18 +185,21 @@ final class VoicePipeline {
         } else {
             segmentSilence += 0.02
         }
-        if bargeIn && segmentSilence < 0.6 && segment.count >= 2 * 16_000 {
+        // While the robot moves: shorter pauses and chunks, so "stop" reaches Whisper sooner.
+        let chunk = fastStop ? 24_000 : 2 * 16_000
+        let pause = fastStop ? 0.3 : 0.6
+        if (bargeIn || fastStop) && segmentSilence < pause && segment.count >= chunk {
             let audio = segment
             segment = Array(segment.suffix(12_800))
             segmentSpeech = 0.4
             DispatchQueue.main.async { self.onSpeechSegment?(audio) }
             return
         }
-        if segmentSilence >= 0.6 || segment.count >= 8 * 16_000 {
+        if segmentSilence >= pause || segment.count >= 8 * 16_000 {
             let audio = segment
             let spoke = segmentSpeech
             resetSegment()
-            if spoke >= 0.2 { DispatchQueue.main.async { self.onSpeechSegment?(audio) } }
+            if spoke >= (fastStop ? 0.12 : 0.2) { DispatchQueue.main.async { self.onSpeechSegment?(audio) } }
         }
     }
 
@@ -223,7 +228,10 @@ final class VoicePipeline {
             DispatchQueue.main.async { self.onPause?(audio) }
         }
 
-        if heardSpeech && (silenceTime >= 0.8 || elapsed >= 20) {
+        // A short command ends after 0.8 s of silence; a long sentence gets more time, because
+        // pauses to think are longer than that (11 November: "it cuts me off, I have to speak fast").
+        let endSilence = speechTime < 1.5 ? 0.8 : speechTime < 4 ? 1.3 : 1.7
+        if heardSpeech && (silenceTime >= endSilence || elapsed >= 30) {
             finish(deliver: true)
         } else if !heardSpeech && elapsed >= startTimeout {
             finish(deliver: false)

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// NUCLEUS mode: only the reactor, in a small round window that lives
@@ -8,10 +9,20 @@ import SwiftUI
 /// and a click opens the full HUD on that display.
 final class ReactorPanel: NSPanel {
     static let size: CGFloat = 170
+    /// The satellite is 30% larger, in a low window that wraps it closely (wings reach the sides,
+    /// above and below there was only empty space): it can sit close to the edges of the display.
+    static let satelliteSize = NSSize(width: 221, height: 130)
+    static func dimensions(for style: String) -> NSSize {
+        style == "satellite" ? satelliteSize : NSSize(width: size, height: size)
+    }
+    private var styleWatch: AnyCancellable?
     /// The normal level, always kept at its back (see `orderFrontRegardless`): above
     /// the wallpaper and the desktop widgets (level −1), below every app window.
     static let desktopLevel = NSWindow.Level.normal
     private var uncover: Timer?
+    /// The SATELLITE floats above every window (user request, 11 November: "it is small and
+    /// nice to look at"); the other styles stay on the desktop, behind the apps.
+    private var floats = false
     /// The display this NUCLEUS belongs to.
     let displayID: CGDirectDisplayID
 
@@ -48,6 +59,27 @@ final class ReactorPanel: NSPanel {
         if !setFrameUsingName(name) && !(setFrameUsingName("JARVISReactor") && isOnOwnScreen) { placeAtCenter() }
         if !isOnOwnScreen { placeAtCenter() }
         setFrameAutosaveName(name)
+        // Size of the chosen style, around the same centre; it follows a change in Settings.
+        styleWatch = assistant.$config.map(\.nucleusStyle).removeDuplicates().sink { [weak self] style in
+            guard let self else { return }
+            self.floats = style == "satellite"
+            self.resize(to: Self.dimensions(for: style))
+            if self.isVisible { self.orderFrontRegardless() }
+        }
+        // The satellite starts every launch in the top right corner of its display (it can still be dragged).
+        if assistant.config.nucleusStyle == "satellite" { placeTopRight() }
+    }
+
+    func placeTopRight() {
+        guard let area = ownScreen?.visibleFrame else { return }
+        setFrameOrigin(NSPoint(x: area.maxX - frame.width - 6, y: area.maxY - frame.height - 6))
+    }
+
+    private func resize(to size: NSSize) {
+        guard frame.size != size else { return }
+        setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2,
+                        width: size.width, height: size.height), display: true)
+        keepOnOwnScreen()
     }
 
     /// The display of this NUCLEUS, if it is still connected.
@@ -61,7 +93,7 @@ final class ReactorPanel: NSPanel {
     /// the core of the user's wallpaper falls.
     func placeAtCenter() {
         guard let area = (ownScreen ?? NSScreen.main)?.visibleFrame else { return }
-        setFrameOrigin(NSPoint(x: area.midX - Self.size / 2, y: area.midY - Self.size / 2))
+        setFrameOrigin(NSPoint(x: area.midX - frame.width / 2, y: area.midY - frame.height / 2))
     }
 
     /// Moves the NUCLEUS, but never past the edges of its own display: every display
@@ -113,6 +145,17 @@ final class ReactorPanel: NSPanel {
     /// the NUCLEUS shared that level and macOS kept the widgets in front of it: on the main
     /// display it stayed visible through them but could no longer be clicked or dragged.
     override func orderFrontRegardless() {
+        if floats {
+            stacking?.invalidate()
+            stacking = nil
+            appCovered = false
+            applyVisibility()
+            level = .floating
+            collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+            super.orderFrontRegardless()
+            return
+        }
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         level = Self.desktopLevel
         orderBack(nil)
         stacking?.invalidate()
@@ -220,22 +263,30 @@ struct CompactReactorView: View {
     @ObservedObject var assistant: Assistant
 
     var body: some View {
+        let size = ReactorPanel.dimensions(for: assistant.config.nucleusStyle)
         ZStack {
             if assistant.config.nucleusBackdrop {
                 // Dark shaded disc: useful on light wallpapers or ones full of windows.
+                // A circle, flattened to an ellipse in the satellite's low window.
                 Circle().fill(RadialGradient(colors: [HUD.background.opacity(0.92), HUD.background.opacity(0.75), .clear],
-                                             center: .center, startRadius: 0, endRadius: ReactorPanel.size / 2))
+                                             center: .center, startRadius: 0, endRadius: size.width / 2))
+                    .frame(width: size.width, height: size.width)
+                    .scaleEffect(x: 1, y: size.height / size.width)
             } else {
                 // Almost invisible, but enough for clicks on the whole circle
                 // to reach the NUCLEUS instead of passing to the wallpaper.
-                Circle().fill(Color.black.opacity(0.012))
+                Ellipse().fill(Color.black.opacity(0.012))
             }
-            ReactorView(assistant: assistant, compact: true, paused: !assistant.compactVisible)
-                .padding(8)
+            if assistant.config.nucleusStyle == "satellite" {
+                SatelliteView(assistant: assistant, paused: !assistant.compactVisible)
+            } else {
+                ReactorView(assistant: assistant, compact: true, paused: !assistant.compactVisible)
+                    .padding(8)
+            }
         }
-        .frame(width: ReactorPanel.size, height: ReactorPanel.size)
-        .contentShape(Circle())
-        .help("NUCLEO di JARVIS · clic per aprire l'HUD, trascina per spostare")
+        .frame(width: size.width, height: size.height)
+        .contentShape(Ellipse())
+        .help("SATELLITE di JARVIS · clic per aprire l'HUD, trascina per spostare")
     }
 }
 

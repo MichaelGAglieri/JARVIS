@@ -175,6 +175,8 @@ final class Assistant: ObservableObject {
         hotKey = HotKey { [weak self] in self?.pushToTalk() }
         privacyKey = HotKey(keyCode: kVK_ANSI_P) { [weak self] in self?.togglePrivacy() }
         tools.onTimer = { [weak self] label, lang in self?.timerFired(label, language: lang) }
+        tools.onBreakTimer = { [weak self] minutes in self?.scheduleBreakEnd(minutes) }
+        setUpHeadsetButton()
         tools.robotConsole.onEvent = { [weak self] text in self?.robotEvent(text) }
         installDebugHooks()
         setUpClaude()
@@ -429,8 +431,13 @@ final class Assistant: ObservableObject {
     }
 
     /// A phrase said near the Mac while JARVIS is waiting: does it contain "Jarvis"?
-    private func speechSegment(_ original: [Float], end: Date = Date()) {
+    private func speechSegment(_ original: [Float], end: Date = Date(), robotChecked: Bool = false) {
         var samples = original
+        // The arm is moving: every phrase is first checked for "stop", without "Jarvis".
+        if robotMoving, !robotChecked, !privacyMode {
+            robotStopCheck(samples, end: end)
+            return
+        }
         // Even while it works silently: "basta" must stop a sequence of actions.
         if isBusy {
             bargeInCheck(samples)
@@ -648,6 +655,12 @@ final class Assistant: ObservableObject {
         Task {
             defer { checkingBargeIn = false }
             guard let text = await transcriber.quickTranscript(samples) else { return }
+            await bargeIn(heard: text, since: start)
+        }
+    }
+
+    private func bargeIn(heard text: String, since start: Date) async {
+        do {
             let heard = text.lowercased().folding(options: .diacriticInsensitive, locale: nil)
             let words = heard.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
             let stopWords = ["basta", "stop", "fermati", "zitto", "silenzio", "smettila", "enough"]
@@ -668,6 +681,77 @@ final class Assistant: ObservableObject {
             // Also stops connected robots, like "basta" said while waiting.
             let stopped = await emergencyStop()
             if !stopped.isEmpty { note(stopped.joined(separator: " · ")) }
+        }
+    }
+
+    // MARK: Instant robot STOP
+
+    /// From a movement command until Robot Console says the arm is still.
+    private var robotMoving = false {
+        didSet { pipeline.fastStop = robotMoving }
+    }
+    private var robotMotionWatch: Task<Void, Never>?
+    private var checkingRobotStop = false
+    private var waitingRobotStop: (samples: [Float], end: Date)?
+
+    /// Called after robot_sequence, robot_home and robot_joint. The watch ends by itself
+    /// when the controller reports no motion (or after 3 s if it never started).
+    private func watchRobotMotion() {
+        robotMotionWatch?.cancel()
+        robotMoving = true
+        robotMotionWatch = Task { [weak self] in
+            let start = Date()
+            var seenMoving = false
+            while !Task.isCancelled, Date().timeIntervalSince(start) < 1800 {
+                try? await Task.sleep(for: .milliseconds(400))
+                guard let self, !Task.isCancelled else { return }
+                guard let moving = await self.tools.robotOperator.isMoving() else { break }
+                if moving { seenMoving = true } else if seenMoving || Date().timeIntervalSince(start) > 3 { break }
+            }
+            guard !Task.isCancelled else { return }
+            self?.robotMoving = false
+        }
+    }
+
+    /// The robot STOP goes out before anything else: no wake word, no voiceprint,
+    /// no model. A false STOP only halts the arm; a missed one is worse.
+    private func robotStopCheck(_ samples: [Float], end: Date) {
+        guard !checkingRobotStop else {
+            waitingRobotStop = (samples, end)
+            return
+        }
+        checkingRobotStop = true
+        let start = Date()
+        Task {
+            defer {
+                checkingRobotStop = false
+                if let next = waitingRobotStop {
+                    waitingRobotStop = nil
+                    speechSegment(next.samples, end: next.end)
+                }
+            }
+            // A bare "stop" of 0.6 s with no silence before it came out empty from Whisper.
+            let padded = samples.count < 16_000 ? [Float](repeating: 0, count: 4_800) + samples : samples
+            guard let text = await transcriber.quickTranscript(padded) else { return }
+            guard RobotVoiceCommand.isMotionStop(text, echo: speech.isSpeaking ? reply : nil) else {
+                Diagnostics.log("stop robot? no [\(Diagnostics.since(start))] \"\(text)\"")
+                // Not a STOP: the phrase continues as usual ("Jarvis, ..." or "basta" to JARVIS's voice).
+                if isBusy { await bargeIn(heard: text, since: start) } else { speechSegment(samples, end: end, robotChecked: true) }
+                return
+            }
+            let stopped = await tools.robotOperator.stop()
+            Diagnostics.log("STOP robot [\(Diagnostics.since(start)) dalla fine della frase] \"\(text)\" → \(stopped)")
+            robotMotionWatch?.cancel()
+            robotMoving = false
+            waitingRobotStop = nil
+            if isBusy {
+                pending = nil
+                interrupt()
+                state = .idle
+            }
+            speech.playChime(rising: false)
+            note("STOP robot a voce · \(stopped)")
+            if tools.ros.isRunning { note("Laboratorio: " + (await tools.ros.lab("stop", wait: 3)).prefix(120)) }
         }
     }
 
@@ -1079,6 +1163,7 @@ final class Assistant: ObservableObject {
         }
         let alternative = alternativeTranscript.flatMap { WakeVerifier.command(from: $0) }
         alternativeTranscript = nil
+        if await runRobotCommand(command, language: lang) { return }
         if await runProtocol(command, language: lang) { return }
         if await runInstantCommand(command, language: lang) { return }
         if let alternative, alternative != command, await runInstantCommand(alternative, language: lang) { return }
@@ -1134,8 +1219,22 @@ final class Assistant: ObservableObject {
     /// How sure an app name must be: here no model checks the sentence again.
     private static let instantCertainty = 0.75
 
-    /// Apps, volume and timers without the model. Goes through the same tools, so log and confirmations
-    /// stay the same. If the sentence is not clear it returns false and the model decides.
+    /// Fixed robot commands precede the legacy click-based protocols.
+    private func runRobotCommand(_ command: String, language lang: Language) async -> Bool {
+        let front = MacActions.frontAppContext()?.lowercased().contains("robot console") == true
+        guard let direct = RobotVoiceCommand.parse(command, consoleInFront: front) else { return false }
+        tools.currentLanguage = lang
+        think("→ canale diretto Robot Console · \(direct.tool)")
+        if case .enable = direct { acknowledge(command, language: lang, forClaude: false) }
+        guard case .result(let result) = await runTracedTool(ToolCall(name: direct.tool, arguments: direct.arguments)) else { return true }
+        guard !Task.isCancelled else { return true }
+        Diagnostics.log("robot diretto [\(Diagnostics.since(Diagnostics.requestStart ?? Date()))] \(direct.tool)")
+        notesForClaude.append("JARVIS already handled \"\(command)\" through Robot Console: \(result). Do not repeat it.")
+        turns.append([["role": "user", "content": command], ["role": "assistant", "content": result]])
+        say(result, language: lang)
+        return true
+    }
+
     private func runProtocol(_ command: String, language lang: Language) async -> Bool {
         guard let (item, rest) = Protocols.match(command) else { return false }
         Diagnostics.log("protocollo \(item.name)")
@@ -1175,8 +1274,77 @@ final class Assistant: ObservableObject {
         return true
     }
 
+    // MARK: Headset button
+
+    private var lastHeadsetPress = Date.distantPast
+
+    /// AirPods: while JARVIS uses their microphone, a press of the stem goes to the app as "mute
+    /// the microphone". Without a handler macOS showed an error ("impossibile connettere JARVIS al
+    /// microfono") or started the music (11 November). The press now works like ⌃⌥Space: speak
+    /// without "Jarvis", or interrupt. The microphone is never left muted.
+    private func setUpHeadsetButton() {
+        guard #available(macOS 14.0, *) else { return }
+        do {
+            // Only a real press (the headset asks to mute) counts: our own unmute below
+            // also calls this handler, and reacting to it looped every 0.6 s (v1.30.16 test).
+            try AVAudioApplication.shared.setInputMuteStateChangeHandler { [weak self] isMuted in
+                guard isMuted else { return true }
+                DispatchQueue.main.async { self?.headsetPressed() }
+                return true
+            }
+        } catch {
+            Diagnostics.log("cuffie    pulsante non gestito: \(error.localizedDescription)")
+        }
+    }
+
+    private func headsetPressed() {
+        guard #available(macOS 14.0, *) else { return }
+        if AVAudioApplication.shared.isInputMuted { try? AVAudioApplication.shared.setInputMuted(false) }
+        // One press can arrive twice: count it once.
+        guard Date().timeIntervalSince(lastHeadsetPress) > 0.6 else { return }
+        lastHeadsetPress = Date()
+        Diagnostics.log("cuffie    pulsante premuto: come ⌃⌥Spazio")
+        pushToTalk()
+    }
+
+    // MARK: Session breaks
+
+    private var breakTask: Task<Void, Never>?
+
+    /// "Pausa" during a session: after the break JARVIS says it is over and asks to resume;
+    /// a "sì" resumes the same session (11 November, user request).
+    private func scheduleBreakEnd(_ minutes: Int) {
+        breakTask?.cancel()
+        guard minutes > 0 else { breakTask = nil; return }
+        breakTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(minutes * 60))
+            guard !Task.isCancelled, let self, let session = self.activity.current, session.isPaused else { return }
+            while self.state != .idle || self.speech.isSpeaking {
+                try? await Task.sleep(for: .seconds(2))
+                if Task.isCancelled { return }
+            }
+            Diagnostics.log("pausa     finita dopo \(minutes) min: \(session.name)")
+            self.pending = PendingAction(summary: "Riprendere la sessione \"\(session.name)\"", alwaysAsk: true) { [weak self] in
+                self?.activity.resume() ?? ""
+            }
+            self.startStandaloneExchange()
+            // An exchange in progress: when the question ends JARVIS keeps listening for the "sì".
+            self.responseTask = Task {}
+            self.say("Signore, la pausa è finita. Ricominciamo? Avvio la sessione?", language: .italian)
+        }
+    }
+
     private func runInstantCommand(_ command: String, language lang: Language) async -> Bool {
         guard let instant = InstantCommand.parse(command) else { return false }
+        // "Pausa" alone during a study or work session is a break, not the music.
+        if instant == .music(.pause), let session = activity.current, !session.isPaused,
+           !command.lowercased().contains("music"), !command.lowercased().contains("pause") {
+            tools.currentLanguage = lang
+            guard case .result(let result) = await runTracedTool(ToolCall(name: "pause_activity", arguments: ["minutes": 10])) else { return true }
+            notesForClaude.append("JARVIS already paused the session: \(result)")
+            say("Pausa di dieci minuti, signore. La avviso quando è finita.", language: lang)
+            return true
+        }
         let italian = lang == .italian
         let sir = italian ? "signore" : "sir"
         tools.currentLanguage = lang
@@ -1915,6 +2083,11 @@ final class Assistant: ObservableObject {
                 }
             }
         }
+        // As after a robot movement command: the instant STOP listens (test of the channel only).
+        center.addObserver(forName: .init(jarvisBundleID + ".debug.robotwatch"), object: nil, queue: .main) { [weak self] note in
+            guard Security.unwrapDeveloperMessage(note.object) != nil else { return }
+            Task { @MainActor in self?.watchRobotMotion() }
+        }
         center.addObserver(forName: .init(jarvisBundleID + ".debug.mic"), object: nil, queue: .main) { [weak self] note in
             guard let how = Security.unwrapDeveloperMessage(note.object) else { return }
             Task { @MainActor in self?.pipeline.debugBreak(how) }
@@ -2076,7 +2249,8 @@ final class Assistant: ObservableObject {
     /// Stops Robot Console and the ROS lab, if active. Returns what it stopped.
     private func emergencyStop() async -> [String] {
         var stopped: [String] = []
-        if tools.robotConsole.isConnected { stopped.append(await tools.robotConsole.stop()) }
+        if tools.robotOperator.available { stopped.append(await tools.robotOperator.stop()) }
+        else if tools.robotConsole.isConnected { stopped.append(await tools.robotConsole.stop()) }
         if tools.ros.isRunning { stopped.append("Laboratorio: " + (await tools.ros.lab("stop", wait: 3)).prefix(120)) }
         return stopped
     }
@@ -2145,6 +2319,7 @@ final class Assistant: ObservableObject {
         switch outcome {
         case .result(let result):
             think(ClaudeBridge.describeToolResult(result, tool: call.name, isError: false))
+            if ["robot_sequence", "robot_home", "robot_joint"].contains(call.name), !result.hasPrefix("Robot:") { watchRobotMotion() }
         case .needsConfirmation:
             think("→ in attesa di conferma")
         case .image:

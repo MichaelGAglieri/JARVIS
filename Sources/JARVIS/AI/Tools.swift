@@ -34,7 +34,7 @@ final class ToolBox {
     var currentSource = "voce"
     private var fromPhone: Bool { currentSource.contains("iphone") }
     /// Everything that moves or heats something real. STOP and reading the state stay allowed.
-    private static let notFromPhone: Set<String> = ["robot_connect", "robot_plan", "robot_execute", "arduino_upload",
+    private static let notFromPhone: Set<String> = ["robot_connect", "robot_plan", "robot_execute", "robot_enable", "robot_joint", "robot_sequence", "robot_home", "arduino_upload",
                                                     "printer_filament", "ros_publish"]
     /// From the phone the lab can only be asked how it is, or stopped.
     private static func movesLab(_ call: ToolCall) -> Bool {
@@ -47,6 +47,7 @@ final class ToolBox {
     /// In privacy mode camera and screen are not used.
     var privacyMode = false
     let robotConsole = RobotConsoleClient()
+    let robotOperator = RobotOperatorChannel()
     let tv = TVControl()
     let flashcards = Flashcards()
 
@@ -93,6 +94,8 @@ final class ToolBox {
     var printerPrint: ((_ model: String?) async -> ToolOutcome)?
     /// Called when a timer expires, with its label.
     var onTimer: ((String, Language) -> Void)?
+    /// A session break of N minutes started (0 = cancel the pending break timer).
+    var onBreakTimer: ((Int) -> Void)?
 
     // MARK: Definitions for the model
 
@@ -161,7 +164,12 @@ final class ToolBox {
         tool("start_activity", "Start tracking time for a study session or work on a project.",
              ["name": str("Subject or project, e.g. Chimica, MioRobot"), "category": enumeration(["study", "project", "other"])],
              required: ["name", "category"]),
-        tool("stop_activity", "Stop the activity currently being tracked.", [:]),
+        tool("stop_activity", "End the session currently being tracked. NOT for a break: for \"pausa\" use pause_activity.", [:]),
+        tool("pause_activity", "Pause the current study/work session for a break (\"pausa\", \"facciamo una pausa\"): the session stays open, breaks are counted, and after the given minutes JARVIS says the break is over and asks to resume.",
+             ["minutes": ["type": "integer", "description": "Length of the break, default 10"]]),
+        tool("resume_activity", "Resume the paused session (\"ricominciamo\", \"riprendiamo\").", [:]),
+        tool("save_session_report", "Save the report of a session as the user dictated it (where they got to), recalled at the next session with the same name.",
+             ["text": str("The report, in the user's words"), "name": str("Session name; default the last session")], required: ["text"]),
         tool("activity_report", "How much time was spent studying or working.",
              ["period": enumeration(["today", "yesterday", "week", "month", "all"]), "category": enumeration(["study", "project", "other"])],
              required: ["period"]),
@@ -180,9 +188,16 @@ final class ToolBox {
         tool("lab_command", "Send an Italian command to the ROS 2 laboratory and wait for the outcome. Valid commands: \"stato\", \"sposta campione a in postazione 1\", \"sposta campione b in postazione 2\", \"riporta campione a\", \"riporta campione b\", \"stop\".",
              ["text": str("The exact Italian command")], required: ["text"]),
         tool("lab_status", "Latest state, outcome and reply of the ROS 2 laboratory.", [:]),
+        tool("robot_enable", "Enable the real robot using the private local channel: USB handshake and the user's initial HOME reference, no trajectory or limits changes. Only on an explicit user request to enable the robot.", [:]),
+        tool("robot_joint", "Move one robot joint within already applied limits. 'di 20 gradi' is relative; 'a 20 gradi' is absolute. Never invent a joint, angle or limits. No retries after a failure.",
+             ["joint": num("Joint number 1 to 6"), "degrees": num("Signed angle in degrees"), "mode": str("relative or absolute"), "consequential": bool("True only when the requested movement is dangerous; asks confirmation")], required: ["joint", "degrees", "mode"]),
+        tool("robot_sequence", "Run the currently enabled Operator poses once, in their visible order, through the private channel. Preserve saved poses and inclusion switches. Optional name executes only that exact, unique pose. No retry after a failure.",
+             ["name": str("Optional exact pose name, only if the user named one")]),
+        tool("robot_home", "Return the real robot to HOME through the private Robot Console channel (no token, like the Vai a HOME button). Use it for any request to go back home; never robot_plan or robot_connect for that.", [:]),
+        tool("robot_close", "Close Robot Console through its STOP ed esci action. No return HOME. Call when the user asks to close Robot Console.", [:]),
         tool("robot_connect", "Connect to the Robot Console app (the user has copied the session token).", [:]),
         tool("robot_status", "State of the Robot Console app: permissions, active or pending programs, saved targets.", [:]),
-        tool("robot_plan", "Prepare (plan only, nothing moves) a Robot Console program: move to a saved target, pick and place between two saved targets, or go HOME. It replaces the instructions of the active Studio project, so it asks for confirmation.",
+        tool("robot_plan", "Prepare (plan only, nothing moves) a Robot Console program: move to a saved target, pick and place between two saved targets. For going HOME use robot_home. It replaces the instructions of the active Studio project, so it asks for confirmation.",
              ["task": enumeration(["target", "pick_place", "home"]), "target": str("Target name for task=target"),
               "from": str("Pick target name for pick_place"), "to": str("Place target name for pick_place"),
               "speed": num("Speed 10-100 %, default 50")], required: ["task"]),
@@ -279,6 +294,8 @@ final class ToolBox {
         let a = call.arguments
         switch call.name {
         case "open_app": return .result(await MacActions.openApp(a))
+        case "quit_app" where ["robot console", "la console del robot"].contains((a.string("name") ?? "").lowercased()):
+            return .result(await robotOperator.run("quit"))
         case "quit_app":
             // Quitting an app can lose unsaved work: ask for confirmation,
             // a single one even for several apps, and only if they are really open.
@@ -332,7 +349,19 @@ final class ToolBox {
         case "start_activity":
             let category = ActivityTracker.Category(rawValue: a.string("category") ?? "") ?? .other
             return .result(activity.start(a.string("name") ?? "attività", category: category))
-        case "stop_activity": return .result(activity.stop())
+        case "stop_activity":
+            onBreakTimer?(0)
+            return .result(activity.stop())
+        case "pause_activity":
+            let result = activity.pause()
+            let minutes = max(1, min(120, a.number("minutes").map { Int($0) } ?? 10))
+            if activity.current?.isPaused == true { onBreakTimer?(minutes) }
+            return .result(result + " Timer di \(minutes) minuti avviato.")
+        case "resume_activity":
+            onBreakTimer?(0)
+            return .result(activity.resume())
+        case "save_session_report":
+            return .result(activity.saveReport(a.string("text") ?? "", name: a.string("name")))
         case "activity_report": return .result(activity.report(period: a.string("period") ?? "today", category: a.string("category")))
         case "project_info": return .result(Security.external("file del progetto", await ProjectInsights.info(a)))
         case "recent_project_activity": return .result(await ProjectInsights.recentActivity(a))
@@ -417,8 +446,18 @@ final class ToolBox {
         case "lab_start": return .result(await ros.startLab())
         case "lab_command": return .result(await ros.lab(a.string("text") ?? "stato"))
         case "lab_status": return .result(await ros.labStatus())
+        case "robot_enable", "robot_joint", "robot_sequence", "robot_home":
+            guard appControlEnabled, !privacyMode else { return .result("Controllo robot disattivato dalle impostazioni o dalla modalità privacy.") }
+            let op = ["robot_enable": "enable", "robot_joint": "jog", "robot_home": "home"][call.name] ?? "sequence"
+            if call.name == "robot_joint", a.bool("consequential") == true {
+                return .needsConfirmation(PendingAction(summary: "Eseguire il movimento robot indicato come pericoloso", alwaysAsk: true) { [robotOperator] in
+                    await robotOperator.run(op, arguments: a)
+                })
+            }
+            return .result(await robotOperator.run(op, arguments: a))
+        case "robot_close": return .result(await robotOperator.run("quit"))
         case "robot_connect": return .result(await robotConsole.connect())
-        case "robot_status": return .result(await robotConsole.status())
+        case "robot_status": return .result(await (robotOperator.available ? robotOperator.status() : robotConsole.status()))
         case "robot_plan":
             // Planning replaces the active project's instructions in Studio:
             // confirmation is asked so as not to wipe the program being worked on.
@@ -433,7 +472,7 @@ final class ToolBox {
         case "robot_execute":
             guard robotConsole.isConnected else { return .result("Robot Console non è collegato.") }
             return .result(await robotConsole.executePlan())
-        case "robot_stop": return .result(await robotConsole.stop())
+        case "robot_stop": return .result(await (robotOperator.available ? robotOperator.stop() : robotConsole.stop()))
         case "look_at_screen" where privacyMode, "look_at_camera" where privacyMode:
             return .result("Modalità privacy attiva: fotocamera e schermo sono disattivati.")
         case let name where name.hasPrefix("app_"):

@@ -242,6 +242,15 @@ final class SpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Synthesises the next sentence as soon as possible: while one sentence is
     /// spoken the next is already being prepared, so there are no pauses.
+    private var forceWhole = false
+
+    /// The next sentence in one piece (when the pieces did not arrive): Qwen3 tries again, then the fallbacks.
+    private func synthesizeWhole() {
+        forceWhole = true
+        synthesizing = false
+        synthesizeNext()
+    }
+
     private func synthesizeNext() {
         guard !synthesizing, !kokoroQueue.isEmpty else { return }
         synthesizing = true
@@ -250,6 +259,12 @@ final class SpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
         let voice = item.language == .english ? kokoroEnglishVoice : italianVoice
         let fallback = kokoroItalianVoice
         let lang = item.language == .english ? "en-gb" : "it"
+        let whole = forceWhole
+        forceWhole = false
+        if item.language == .italian, usesQwen, !whole {
+            synthesizeInPieces(item.text, generation: gen)
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
             let speed = item.language == .italian ? self.italianSpeed : self.kokoroSpeed
@@ -271,6 +286,93 @@ final class SpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// Italian with Qwen3: each piece plays as soon as it arrives (the first after about a third
+    /// of a second), so JARVIS starts speaking without waiting for the whole sentence.
+    /// If nothing arrives, the sentence goes the usual way (Supertonic, then Kokoro).
+    private func synthesizeInPieces(_ text: String, generation gen: Int) {
+        let speed = italianSpeed
+        Task { [weak self] in
+            guard let self else { return }
+            let start = Date()
+            var pieces = 0
+            do {
+                for try await piece in self.kokoro.synthesizeStream(text, speed: speed) {
+                    let current = await MainActor.run { () -> Bool in
+                        guard gen == self.generation else { return false }
+                        if pieces == 0 {
+                            Diagnostics.log("voce      [\(Diagnostics.since(start))] primo pezzo, \(text.count) caratteri")
+                        }
+                        self.deliver(piece)
+                        return true
+                    }
+                    guard current else { return }
+                    pieces += 1
+                }
+            } catch {
+                Diagnostics.log("voce      a pezzi non riuscita dopo \(pieces) pezzi: \(error.localizedDescription)")
+            }
+            if Diagnostics.logsSpeech { Diagnostics.log("voce testo \(text)") }
+            await MainActor.run {
+                guard gen == self.generation else { return }
+                Diagnostics.log("voce      [\(Diagnostics.since(start))] fine, \(pieces) pezzi")
+                self.synthesizing = false
+                if pieces > 0 {
+                    self.finishPieces(generation: gen)
+                } else {
+                    self.kokoroQueue.insert((text, .italian), at: 0)
+                    self.synthesizeWhole()
+                    return
+                }
+                self.synthesizeNext()
+            }
+        }
+    }
+
+    /// On the iPhone each piece travels as its own clip, which the phone plays in a row. The last piece
+    /// is held back until the sentence ends, so only its "played" closes the sentence.
+    private var heldPiece: AVAudioPCMBuffer?
+
+    private func deliver(_ piece: AVAudioPCMBuffer) {
+        guard let phoneRoute else {
+            schedule(piece, language: .italian, last: false)
+            return
+        }
+        if let held = heldPiece { phoneRoute(held) {} }
+        heldPiece = piece
+    }
+
+    private func finishPieces(generation gen: Int) {
+        if let phoneRoute, let held = heldPiece {
+            heldPiece = nil
+            phoneRoute(held) { [weak self] in
+                guard let self, gen == self.generation else { return }
+                self.utteranceEnded()
+            }
+            return
+        }
+        // The phone left mid-sentence: its last piece plays here.
+        if let held = heldPiece { schedule(held, language: .italian, last: false) }
+        heldPiece = nil
+        // An empty piece closes the sentence: its end arrives after the last real piece has played.
+        schedule(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1)!, language: .italian, last: true, generation: gen)
+    }
+
+    private func schedule(_ buffer: AVAudioPCMBuffer, language: Language, last: Bool, generation gen: Int = 0) {
+        kokoroPlaying = true
+        pitch.pitch = language == .italian ? italianPitch : kokoroEnglishPitch
+        if last {
+            player.scheduleBuffer(buffer) { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, gen == self.generation else { return }
+                    self.utteranceEnded()
+                }
+            }
+        } else {
+            player.scheduleBuffer(buffer)
+        }
+        if !player.isPlaying { player.play() }
+    }
+
     private func startEngine() {
         guard !engine.isRunning else { return }
         engine.prepare()
@@ -279,6 +381,7 @@ final class SpeechEngine: NSObject, AVSpeechSynthesizerDelegate {
 
     func stop() {
         generation += 1
+        heldPiece = nil
         queued = 0
         kokoroQueue.removeAll()
         synthesizing = false

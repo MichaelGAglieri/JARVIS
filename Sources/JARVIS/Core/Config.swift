@@ -44,6 +44,8 @@ struct JarvisConfig: Codable, Equatable {
     var developerMode = false
     /// Dark shaded disc behind the NUCLEUS (off: it blends completely with the wallpaper).
     var nucleusBackdrop = true
+    /// Look of the NUCLEUS: "reattore" (the original reactor) or "satellite" (3D satellite).
+    var nucleusStyle = "reattore"
     var whisperModel = "openai_whisper-large-v3-v20240930_turbo_632MB"
     var localModel = "gemma4:12b-it-qat"
     var ollamaURL = "http://localhost:11434"
@@ -131,6 +133,7 @@ struct JarvisConfig: Codable, Equatable {
         whisperWake = try c.decodeIfPresent(Bool.self, forKey: .whisperWake) ?? d.whisperWake
         developerMode = try c.decodeIfPresent(Bool.self, forKey: .developerMode) ?? d.developerMode
         nucleusBackdrop = try c.decodeIfPresent(Bool.self, forKey: .nucleusBackdrop) ?? d.nucleusBackdrop
+        nucleusStyle = try c.decodeIfPresent(String.self, forKey: .nucleusStyle) ?? d.nucleusStyle
         whisperModel = try c.decodeIfPresent(String.self, forKey: .whisperModel) ?? d.whisperModel
         localModel = try c.decodeIfPresent(String.self, forKey: .localModel) ?? d.localModel
         ollamaURL = try c.decodeIfPresent(String.self, forKey: .ollamaURL) ?? d.ollamaURL

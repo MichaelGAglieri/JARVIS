@@ -20,5 +20,6 @@ SPEAKER=https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongit
 # Italian voice: downloads the official Supertone/supertonic-3 model.
 [[ -f supertonic/onnx/vocoder.onnx ]] || .venv/bin/python -I -c 'import os; from supertonic import TTS; TTS(model_dir=os.path.abspath("supertonic"), auto_download=True)'
 # Italian voice: official Qwen3-TTS model for Apple Silicon.
-[[ -f qwen3/config.json ]] || .venv/bin/python -I -c 'from huggingface_hub import snapshot_download; snapshot_download("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit", local_dir="qwen3")'
+# Italian voice: the small Qwen3 (0.6B), about 40% less GPU work than the 1.7B used until 1.30.18.
+[[ -f qwen3-0.6b/config.json ]] || .venv/bin/python -I -c 'from huggingface_hub import snapshot_download; snapshot_download("mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit", local_dir="qwen3-0.6b")'
 echo "✓ Voci pronte in $TTS"

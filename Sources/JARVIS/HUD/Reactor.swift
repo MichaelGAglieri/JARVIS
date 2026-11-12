@@ -131,7 +131,14 @@ struct ReactorView: View {
     }
 }
 
-private struct SphereSurface: NSViewRepresentable {
+// The same sphere on the Mac and in the iPhone/iPad app, which shares this file.
+#if os(macOS)
+private typealias PlatformViewRepresentable = NSViewRepresentable
+#else
+private typealias PlatformViewRepresentable = UIViewRepresentable
+#endif
+
+private struct SphereSurface: PlatformViewRepresentable {
     let resources: SphereGPU
     let animator: ReactorAnimator
     let motion: SphereMotion
@@ -144,11 +151,17 @@ private struct SphereSurface: NSViewRepresentable {
     let compact: Bool
     let paused: Bool
 
-    func makeNSView(context: Context) -> SphereMetalView {
-        SphereMetalView(resources: resources)
-    }
+    #if os(macOS)
+    func makeNSView(context: Context) -> SphereMetalView { SphereMetalView(resources: resources) }
+    func updateNSView(_ view: SphereMetalView, context: Context) { update(view) }
+    static func dismantleNSView(_ view: SphereMetalView, coordinator: ()) { dismantle(view) }
+    #else
+    func makeUIView(context: Context) -> SphereMetalView { SphereMetalView(resources: resources) }
+    func updateUIView(_ view: SphereMetalView, context: Context) { update(view) }
+    static func dismantleUIView(_ view: SphereMetalView, coordinator: ()) { dismantle(view) }
+    #endif
 
-    func updateNSView(_ view: SphereMetalView, context: Context) {
+    private func update(_ view: SphereMetalView) {
         view.frozen = paused
         guard !paused else { return }
         animator.step(date, state: state, deepIdle: deepIdle, privacy: privacy, mic: mic, voice: voice)
@@ -160,7 +173,7 @@ private struct SphereSurface: NSViewRepresentable {
         view.renderFrame()
     }
 
-    static func dismantleNSView(_ view: SphereMetalView, coordinator: ()) {
+    private static func dismantle(_ view: SphereMetalView) {
         view.frozen = true
         view.releaseDrawables()
     }
@@ -185,12 +198,21 @@ private final class SphereMetalView: MTKView {
         isPaused = true
         enableSetNeedsDisplay = false
         autoResizeDrawable = false
+        #if os(macOS)
         wantsLayer = true
         layer?.isOpaque = false
+        #else
+        isOpaque = false
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        layer.isOpaque = false
+        #endif
         (layer as? CAMetalLayer)?.maximumDrawableCount = 3
     }
 
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    #if os(macOS)
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -209,12 +231,31 @@ private final class SphereMetalView: MTKView {
         renderFrame()
     }
 
+    private var onScreen: Bool {
+        guard let window else { return false }
+        return window.isVisible && window.occlusionState.contains(.visible) && !isHiddenOrHasHiddenAncestor
+    }
+    private var pixelScale: CGFloat { window?.backingScaleFactor ?? 2 }
+    #else
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        renderFrame()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        renderFrame()
+    }
+
+    private var onScreen: Bool { window != nil && !isHidden && alpha > 0 }
+    private var pixelScale: CGFloat { traitCollection.displayScale }
+    #endif
+
     func renderFrame() {
-        guard !frozen, let window, window.isVisible,
-              window.occlusionState.contains(.visible), !isHiddenOrHasHiddenAncestor,
+        guard !frozen, onScreen,
               bounds.width > 0, bounds.height > 0, let metal = layer as? CAMetalLayer else { return }
         // Retina is capped at 2x. No full-screen offscreen textures or bloom passes.
-        let scale = min(window.backingScaleFactor, 2)
+        let scale = min(pixelScale, 2)
         let size = CGSize(width: max(1, (bounds.width * scale).rounded()),
                           height: max(1, (bounds.height * scale).rounded()))
         if metal.drawableSize != size { metal.drawableSize = size }
@@ -328,8 +369,14 @@ private struct SpherePalette {
     let amber = rgba(HUD.amber), privacy = rgba(HUD.privacy)
 
     private static func rgba(_ color: Color) -> SIMD4<Float> {
+        #if os(macOS)
         let c = NSColor(color).usingColorSpace(.deviceRGB) ?? .cyan
         return SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), 1)
+        #else
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return SIMD4(Float(r), Float(g), Float(b), 1)
+        #endif
     }
 }
 
@@ -412,7 +459,7 @@ private struct SphereGeometry {
 
         // 1. Plexus: nodes in the whole volume, denser on the shell, joined to nearby nodes.
         // The shell holds most of them: seen at the edges, it gives the sphere its rotating outline.
-        let nodeCount = compact ? 160 : 1150
+        let nodeCount = compact ? 160 : 1500
         var nodes: [SIMD3<Float>] = []
         for i in 0..<nodeCount {
             let radius: Float = i % 9 == 0 ? r(0.08, 0.35) : i % 5 == 0 ? r(0.35, 0.8) : r(0.84, 0.97)
@@ -442,47 +489,61 @@ private struct SphereGeometry {
         // 2. Neural network (group 2): neurons inside the sphere, with dendrites, joined by
         // soft glowing axons. Each neuron fires in turn: its body flashes and a pulse runs
         // along its axons and dendrites. The seed of every piece is its neuron's firing phase.
-        let neuronCount = compact ? 5 : 16
+        // 44 neurons joined to their three nearest (11 November: the user wanted a denser sphere).
+        let neuronCount = compact ? 5 : 44
         var neurons: [(p: SIMD3<Float>, seed: Float)] = []
         for _ in 0..<neuronCount {
-            let p = unit() * r(0.16, 0.74), seed = r(0, 1)
+            // The first neuron is the heart of the sphere: a larger cell body at the centre, with long branching dendrites.
+            let central = !compact && neurons.isEmpty
+            var p = SIMD3<Float>.zero
+            if !central {
+                // Best of eight tries: the one farthest from the neurons already placed, so no side stays empty.
+                var best: Float = -1
+                for _ in 0..<(compact ? 1 : 8) {
+                    let c = unit() * r(0.25, 0.92)
+                    let d = neurons.map { simd_distance($0.p, c) }.min() ?? 1
+                    if d > best { best = d; p = c }
+                }
+            }
+            let seed = r(0, 1)
             neurons.append((p, seed))
-            dot(p, group: 2, radius: compact ? 3.5 : 8, brightness: r(1.0, 1.3), kind: 3, seed: seed)
+            dot(p, group: 2, radius: compact ? 3.5 : central ? 17 : 8, brightness: central ? 1.5 : r(1.0, 1.3), kind: 3, seed: seed)
             // Dendrites: short branching tendrils around the body.
-            for _ in 0..<(compact ? 2 : 5) {
+            for _ in 0..<(compact ? 2 : central ? 12 : 6) {
                 var direction = unit(), q = p
-                for level in 0..<2 {
-                    let length = level == 0 ? r(0.10, 0.2) : r(0.05, 0.1), bend = unit() * 0.6
+                for level in 0..<(compact ? 2 : 3) {
+                    let length = (level == 0 ? r(0.10, 0.2) : level == 1 ? r(0.05, 0.1) : r(0.03, 0.07)) * (central ? 1.9 : 1), bend = unit() * 0.6
                     var previous = q
                     for step in 1...8 {
                         let f = Float(step) / 8
                         let next = q + simd_normalize(direction + bend * f) * length * f
-                        line(previous, next, group: 2, opacity: 0.5 * (1 - f * 0.5), width: level == 0 ? 0.9 : 0.7,
+                        line(previous, next, group: 2, opacity: 0.5 * (1 - f * 0.5), width: (level == 0 ? 0.9 : 0.7) * (central ? 2.2 : 1),
                              flow: (Float(level) + f) * 0.12, seed: seed)
                         previous = next
                     }
                     q = previous
-                    if level == 0 && !compact { dot(q, group: 2, radius: 2, brightness: 0.9, kind: 0) }
+                    if level < 2 && !compact { dot(q, group: 2, radius: central ? 3 : 2, brightness: 0.9, kind: 0) }
                     direction = simd_normalize(direction + unit() * 0.9)
                 }
             }
         }
-        // Axons: each neuron to its two nearest and, sometimes, to a far one.
+        // Axons: each neuron to its nearest ones (three in the full sphere) and, sometimes, to a far one.
         var joined = Set<Int>()
         for (i, n) in neurons.enumerated() {
             let near = neurons.indices.filter { $0 != i }.sorted {
                 simd_distance(n.p, neurons[$0].p) < simd_distance(n.p, neurons[$1].p)
             }
-            var targets = Array(near.prefix(2))
+            var targets = Array(near.prefix(compact ? 2 : 3))
             if random.next() < 0.35, let far = near.last { targets.append(far) }
             for j in targets where !joined.contains(min(i, j) * 100 + max(i, j)) {
                 joined.insert(min(i, j) * 100 + max(i, j))
                 let a = n.p, b = neurons[j].p
-                let control = (a + b) / 2 + unit() * simd_distance(a, b) * 0.35
+                // Like brain tissue: some axons run almost straight, others bend in any direction.
+                let control = (a + b) / 2 + unit() * simd_distance(a, b) * (random.next() < 0.45 ? 0.05 : 0.35)
                 let path: (Float) -> SIMD3<Float> = { f in
                     var p = a * (1 - f) * (1 - f) + control * 2 * f * (1 - f) + b * f * f
                     let l = simd_length(p)
-                    if l > 0.9 { p *= 0.9 / l }
+                    if l > 0.95 { p *= 0.95 / l }
                     return p
                 }
                 ribbon(steps: compact ? 16 : 44, strands: compact ? 2 : 6, group: 2, plane: nil, glow: 1, seed: n.seed,
@@ -504,7 +565,7 @@ private struct SphereGeometry {
         }
 
         // 5. Broken rim: short dashes just outside the shell, always on the outline.
-        for _ in 0..<(compact ? 14 : 110) {
+        for _ in 0..<(compact ? 14 : 0) {
             let angle = r(0, 2 * .pi), length = r(0.015, 0.07), radius = r(0.95, 1.05), seed = r(0, 20)
             let thick = random.next() < 0.3
             line(SIMD3(radius * cos(angle), radius * sin(angle), 0), SIMD3(radius * cos(angle + length), radius * sin(angle + length), 0),
@@ -513,13 +574,13 @@ private struct SphereGeometry {
 
         // 6. Small data screens (bars, waveforms, scrolling lines) on the shell and a few inside.
         // They turn with the sphere; none circles around the outline.
-        for i in 0..<(compact ? 6 : 34) {
+        for i in 0..<(compact ? 6 : 8) {
             dot(unit() * (i % 3 == 0 ? r(0.3, 0.8) : r(0.85, 0.98)), group: 0, radius: r(4, 7), brightness: r(0.65, 1), kind: 1)
         }
 
         // 7. Core: a wide halo and a white-hot centre. Analytic sprites, no blur.
-        dot(.zero, group: 1, radius: compact ? 16 : 80, brightness: 1.3, kind: 2)
-        dot(.zero, group: 1, radius: compact ? 6 : 22, brightness: 1.5, kind: 2)
+        dot(.zero, group: 1, radius: compact ? 16 : 46, brightness: 1.0, kind: 2)
+        dot(.zero, group: 1, radius: compact ? 6 : 9, brightness: 1.2, kind: 2)
         segments = segs
         points = pts
     }
@@ -620,7 +681,13 @@ private final class SphereGPU {
         float3 p = q.xyz;
         float live = 1.0 - u.state.z * 0.85;
         float ripple = sin(dot(p,float3(4,7,3)) - u.motion.y * 2.5);
-        p *= u.dynamics.x + ripple * u.motion.w * 0.018 * live;
+        p *= u.dynamics.x + ripple * (u.motion.w * 0.018 + (u.dynamics.x - 1.0) * 0.55) * live;
+        if (q.w < 0.5 || q.w > 1.5) {
+            // A slow, even breathing: one wide wave crosses the whole sphere, barely changing its shape.
+            float t = u.motion.x;
+            float wave = sin(dot(p,float3(1.1,0.8,0.9)) + t*0.55) * 0.7 + sin(t*0.4) * 0.3;
+            p *= 1.0 + wave * 0.014 * (0.6 + 0.4 * live);
+        }
         if (q.w > 0.5 && q.w < 1.5) {
             // Rim and core: turn about the view axis, so they always sit on the outline.
             float s = -u.motion.y * 0.30, cs = cos(s), sn = sin(s);
@@ -633,7 +700,7 @@ private final class SphereGPU {
             p.yz = float2(p.y*u.rotation.z - p.z*u.rotation.w, p.y*u.rotation.w + p.z*u.rotation.z);
         }
         float reveal = smoothstep(0.0, 0.85, u.state.x);
-        float scale = 0.94 * (0.86 + 0.14 * reveal) / (1.12 - p.z*0.16);
+        float scale = 0.93 * (0.86 + 0.14 * reveal) / (1.12 - p.z*0.16);
         float2 aspect = min(u.viewport.x,u.viewport.y) / u.viewport.xy;
         return float3(p.xy * scale * aspect, p.z);
     }

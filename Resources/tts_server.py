@@ -9,6 +9,9 @@ POST /synth  {"text": ..., "voice": "bm_lewis", "lang": "en-gb", "speed": 1.0}
   "voice": "qwen3" uses Qwen3 with the voice of voce_jarvis.wav; if it fails it falls back to
   Supertonic ("supertonic:M4:0.5+M3:0.5") and then to "fallback", a Kokoro voice.
   "keep": true saves the audio to disk: used for acknowledgments, fixed sentences to say at once.
+  "stream": true (Qwen3 only) sends the audio in pieces while it is generated: the first words
+  arrive after about a third of a second instead of after the whole sentence. The body has no
+  length and ends when the connection closes.
   "onlySaved": true returns only an already saved audio, without generating anything.
   -> PCM float32 little-endian audio, mono, 24000 Hz
 
@@ -66,7 +69,11 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 
 # Qwen3 Italian voice (optional). It works entirely in its own thread: MLX wants a single
 # thread, and the speaker voice check must not wait for a sentence to finish.
-QWEN_DIR = os.path.join(HERE, "qwen3")
+# The small Qwen3 (0.6B, since 1.30.19) does about 40% less GPU work than the 1.7B one, with the
+# same cloned voice; the 1.7B one stays as a fallback if the small one is missing.
+QWEN_DIR = next((os.path.join(HERE, d) for d in ("qwen3-0.6b", "qwen3")
+                 if os.path.exists(os.path.join(HERE, d, "config.json"))), os.path.join(HERE, "qwen3"))
+QWEN_STREAM_INTERVAL = 0.6  # seconds of audio per piece
 QWEN_VOICE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voce_jarvis.wav")
 QWEN_VOICE_TEXT = ("Subito, signore. Ho completato il controllo: tutti i sistemi sono operativi "
                    "e possiamo procedere con il volo di prova quando desidera.")
@@ -94,6 +101,21 @@ def qwen_worker():
             mx.clear_cache()
             return samples
 
+        def generate_pieces(text, speed, job):
+            first = True
+            for part in model.generate(text=text, ref_audio=reference, ref_text=QWEN_VOICE_TEXT,
+                                       lang_code="italian", speed=speed, verbose=False, stream=True,
+                                       streaming_interval=QWEN_STREAM_INTERVAL):
+                if job.get("cancel"):
+                    break
+                samples = np.asarray(part.audio).squeeze()
+                if first:
+                    samples = trim_leading_silence(samples, 24000)
+                    first = False
+                if len(samples):
+                    job["pieces"].put(np.asarray(samples, dtype="<f4").tobytes())
+            mx.clear_cache()
+
         generate("Pronto.", 1.0)
     except Exception:  # noqa: BLE001
         qwen_broken = True
@@ -103,14 +125,20 @@ def qwen_worker():
     while True:
         text, speed, job = qwen_jobs.get()
         try:
-            job["audio"] = np.asarray(trim_silence(generate(text, speed), 24000), dtype="<f4").tobytes()
+            if "pieces" in job:
+                generate_pieces(text, speed, job)
+            else:
+                job["audio"] = np.asarray(trim_silence(generate(text, speed), 24000), dtype="<f4").tobytes()
         except Exception as error:  # noqa: BLE001
             job["error"] = error
+        if "pieces" in job:
+            job["pieces"].put(None)
         job["done"].set()
 
 
 def saved_clip_path(text, speed):
-    key = f"{os.path.getsize(QWEN_VOICE)}|{speed}|{text}"
+    model = "" if os.path.basename(QWEN_DIR) == "qwen3" else os.path.basename(QWEN_DIR) + "|"
+    key = f"{os.path.getsize(QWEN_VOICE)}|{model}{speed}|{text}"
     return os.path.join(QWEN_CLIPS, hashlib.sha256(key.encode()).hexdigest() + ".pcm")
 
 
@@ -139,6 +167,16 @@ def synth_qwen(text, speed, keep):
         with open(clip, "wb") as file:
             file.write(job["audio"])
     return job["audio"]
+
+
+def stream_qwen(text, speed):
+    """Starts a Qwen3 sentence in pieces; returns the job, or None if Qwen3 cannot do it."""
+    spoken = italian_speech(text)
+    if not spoken or not qwen_ready.wait(60) or qwen_broken:
+        return None
+    job = {"done": threading.Event(), "pieces": queue.Queue()}
+    qwen_jobs.put((spoken, speed, job))
+    return job
 
 
 # Qwen3 fallback: it loads only when needed, so it takes no memory.
@@ -239,6 +277,12 @@ def trim_silence(samples, rate):
     return samples
 
 
+def trim_leading_silence(samples, rate):
+    samples = np.asarray(samples, dtype=np.float32).squeeze()
+    audible = np.flatnonzero(np.abs(samples) > 0.005)
+    return samples[max(0, audible[0] - int(0.02 * rate)):] if len(audible) else samples[:0]
+
+
 def to_app_rate(samples, rate, target=24000):
     """From 44.1 kHz to the 24 kHz the app plays, with a filter that avoids hiss."""
     samples = trim_silence(samples, rate)
@@ -308,6 +352,8 @@ class Handler(BaseHTTPRequestHandler):
                 audio = embed(body)
             else:
                 req = json.loads(body)
+                if req.get("stream") and req.get("voice") == "qwen3" and self.send_pieces(req):
+                    return
                 audio = saved_clip(req["text"], float(req.get("speed", 1.0))) if req.get("onlySaved") else synth(req["text"], req.get("voice", "bm_lewis"), req.get("lang", "en-gb"), float(req.get("speed", 1.0)), req.get("fallback"), bool(req.get("keep")))
         except Exception as error:  # noqa: BLE001 - the error must be returned to the app
             body = str(error).encode()
@@ -321,6 +367,32 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(audio)))
         self.end_headers()
         self.wfile.write(audio)
+
+    def send_pieces(self, req):
+        """The sentence in pieces as Qwen3 makes them. False if no piece came: the normal path takes over."""
+        job = stream_qwen(req["text"], float(req.get("speed", 1.0)))
+        if job is None:
+            return False
+        try:
+            first = job["pieces"].get(timeout=80)
+        except queue.Empty:
+            job["cancel"] = True
+            return False
+        if first is None:
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.end_headers()
+        piece = first
+        try:
+            while piece is not None:
+                self.wfile.write(piece)
+                self.wfile.flush()
+                piece = job["pieces"].get(timeout=80)
+        except (OSError, queue.Empty):
+            # JARVIS stopped listening ("basta"): the rest of the sentence is not generated.
+            job["cancel"] = True
+        return True
 
     def log_message(self, *args):
         pass
